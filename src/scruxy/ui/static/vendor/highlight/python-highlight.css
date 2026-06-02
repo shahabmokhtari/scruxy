@@ -1,0 +1,20 @@
+/* ===================================================================
+   Python syntax highlighting theme for Scruxy plugin editor.
+   Dark-mode-first, with light-mode overrides.
+   =================================================================== */
+
+/* Dark theme (default) */
+.py-kw  { color: #c678dd; }       /* keywords: purple */
+.py-str { color: #98c379; }       /* strings: green */
+.py-cmt { color: #5c6370; font-style: italic; }  /* comments: gray italic */
+.py-dec { color: #e5c07b; }       /* decorators: gold */
+.py-num { color: #d19a66; }       /* numbers: orange */
+.py-bi  { color: #61afef; }       /* builtins: blue */
+
+/* Light theme overrides */
+:root.light .py-kw  { color: #a626a4; }
+:root.light .py-str { color: #50a14f; }
+:root.light .py-cmt { color: #a0a1a7; font-style: italic; }
+:root.light .py-dec { color: #c18401; }
+:root.light .py-num { color: #986801; }
+:root.light .py-bi  { color: #4078f2; }

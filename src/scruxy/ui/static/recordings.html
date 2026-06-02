@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Scruxy - Recordings</title>
+  <link rel="stylesheet" href="/ui/static/css/styles.css">
+</head>
+<body>
+
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-icon">S</div>
+      <span>Scrub Proxy</span>
+    </div>
+    <ul class="sidebar-nav">
+      <li><a href="/ui/"><span class="nav-icon">&#9632;</span> Dashboard</a></li>
+      <li><a href="/ui/tester"><span class="nav-icon">&#9654;</span> Tester</a></li>
+      <li><a href="/ui/plugins"><span class="nav-icon">&#9883;</span> Plugins</a></li>
+      <li><a href="/ui/providers"><span class="nav-icon">&#9729;</span> Providers</a></li>
+      <li><a href="/ui/tokens"><span class="nav-icon">&#9919;</span> Tokens</a></li>
+      <li><a href="/ui/recordings"><span class="nav-icon">&#9673;</span> Recordings</a></li>
+      <li><a href="/ui/passthrough"><span class="nav-icon">&#8644;</span> Passthrough</a></li>
+      <li><a href="/ui/logs"><span class="nav-icon">&#9776;</span> Logs</a></li>
+      <li><a href="/ui/settings"><span class="nav-icon">&#9881;</span> Settings</a></li>
+    </ul>
+    <div class="sidebar-footer">Scruxy v0.1.0</div>
+  </aside>
+
+  <div class="main-wrapper">
+    <header class="header">
+      <div class="header-title">Session Recordings</div>
+      <div class="header-controls">
+        <span id="proxy-status" class="status-badge online">
+          <span class="status-dot"></span> Proxy Active
+        </span>
+        <button id="theme-toggle" class="theme-toggle" title="Toggle theme">&#9788;</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <div class="section-header mb-4">
+        <div>
+          <div class="section-title">Recordings</div>
+          <div class="section-subtitle">Browse recorded request/response pairs per session.</div>
+        </div>
+      </div>
+
+      <div class="card mb-4">
+        <div class="flex items-center gap-3">
+          <label for="rec-session-select" class="text-secondary text-sm">Session:</label>
+          <select id="rec-session-select" style="min-width: 300px;">
+            <option value="">-- Select a session --</option>
+          </select>
+          <div class="rec-view-toggle">
+            <button class="btn btn-sm btn-outline active" id="btn-view-raw" title="Raw JSON view">&#9776; Raw</button>
+            <button class="btn btn-sm btn-outline" id="btn-view-diff" title="Before/After scrub comparison">&#9881; Scrub Diff</button>
+            <button class="btn btn-sm btn-outline" id="btn-view-chat" title="Chat message view">&#9993; Chat</button>
+          </div>
+          <button class="btn btn-outline btn-sm" id="btn-sort-order" title="Toggle sort order">&#8595; Newest First</button>
+          <button class="btn btn-outline btn-sm" id="btn-layout-toggle" title="Toggle request/response layout">&#9638; Side by Side</button>
+          <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;color:var(--text-secondary);cursor:pointer;user-select:none;">
+            <input type="checkbox" id="chk-auto-refresh" checked> Auto Refresh
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;color:var(--text-secondary);cursor:pointer;user-select:none;">
+            <input type="checkbox" id="chk-beautify-json" checked> Beautify JSON
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;color:var(--text-secondary);cursor:pointer;user-select:none;">
+            <input type="checkbox" id="chk-show-diff"> Show Diff
+          </label>
+          <button class="btn btn-outline btn-sm" id="btn-refresh-recordings">Refresh</button>
+          <button class="btn btn-danger btn-sm" id="btn-clear-all-sessions">Clear All Sessions</button>
+        </div>
+      </div>
+
+      <!-- Filter bar -->
+      <div class="card mb-4" id="rec-filter-bar">
+        <div class="flex items-center gap-3">
+          <label class="text-secondary text-sm">Provider:</label>
+          <select id="rec-filter-provider" style="min-width:140px;">
+            <option value="">All Providers</option>
+          </select>
+          <label class="text-secondary text-sm">Proxy:</label>
+          <select id="rec-filter-proxy" style="min-width:100px;">
+            <option value="">All Types</option>
+            <option value="reverse">REV</option>
+            <option value="forward">FWD</option>
+          </select>
+          <label class="text-secondary text-sm">Search:</label>
+          <input type="text" id="rec-filter-search" placeholder="Filter by URL, body, method..." style="flex:1;min-width:200px;">
+          <button class="btn btn-outline btn-sm" id="btn-clear-filters">Clear Filters</button>
+          <span id="rec-filter-count" class="text-secondary text-sm"></span>
+        </div>
+      </div>
+
+      <!-- Diff settings toolbar (visible only in diff mode) -->
+      <div id="diff-toolbar" class="diff-toolbar hidden">
+        <div class="diff-toolbar-group">
+          <span class="diff-toolbar-label">Layout:</span>
+          <div class="rec-view-toggle">
+            <button class="btn btn-sm btn-outline active" id="btn-layout-inline" title="Unified inline diff">Inline</button>
+            <button class="btn btn-sm btn-outline" id="btn-layout-side" title="Side-by-side columns">Side by Side</button>
+          </div>
+        </div>
+        <label class="diff-toolbar-check"><input type="checkbox" id="chk-diff-only"> Show Only Diff</label>
+        <label class="diff-toolbar-check"><input type="checkbox" id="chk-word-diff"> Word Diff</label>
+        <label class="diff-toolbar-check"><input type="checkbox" id="chk-ignore-ws"> Ignore Whitespace</label>
+        <label class="diff-toolbar-check"><input type="checkbox" id="chk-word-wrap" checked> Word Wrap</label>
+      </div>
+
+      <div id="rec-new-banner" class="rec-new-banner hidden"></div>
+      <div class="card">
+        <div id="recordings-timeline">
+          <div class="empty-state text-sm">Select a session to view recordings</div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/ui/static/js/shared.js"></script>
+  <script src="/ui/static/js/recordings.js"></script>
+</body>
+</html>

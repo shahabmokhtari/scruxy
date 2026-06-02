@@ -1,0 +1,44 @@
+# Regex patterns for PII detection
+# Uncomment and customize patterns below, or add your own.
+# Each pattern needs: name, entity_type, pattern (regex), score (0.0-1.0)
+# Optional: context_words (list of words that boost score when found nearby)
+
+# regex_patterns:
+
+# --- Sample patterns (uncomment to enable) ---
+# To activate, uncomment 'regex_patterns:' above and the patterns you want.
+
+#  - name: guid
+#    entity_type: GUID
+#    pattern: '\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b'
+#    score: 0.8
+#    context_words: [id, uuid, guid, identifier, correlation]
+
+#  - name: badge_number
+#    entity_type: BADGE_NUMBER
+#    pattern: '(?i)\bBADGE[#_\-]\s*[0-9A-Za-z]{3,12}\b'
+#    score: 0.9
+#    context_words: [badge, employee, access, card]
+
+#  - name: phone_number
+#    entity_type: PHONE_NUMBER
+#    pattern: '\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'
+#    score: 0.6
+#    context_words: [phone, call, tel, mobile, cell, fax]
+
+#  - name: email_address
+#    entity_type: EMAIL_ADDRESS
+#    pattern: '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+#    score: 0.9
+#    context_words: [email, mail, contact, address]
+
+#  - name: employee_id
+#    entity_type: EMPLOYEE_ID
+#    pattern: '\bEMP-\d{6}\b'
+#    score: 0.95
+#    context_words: [employee, id, staff, worker]
+
+#  - name: azure_connection_string
+#    entity_type: CONNECTION_STRING
+#    pattern: '(?i)(?:AccountKey|SharedAccessKey|Password)=[A-Za-z0-9+/=]{20,}'
+#    score: 0.95

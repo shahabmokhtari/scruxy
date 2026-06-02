@@ -1,0 +1,85 @@
+# Scruxy — Default Configuration
+
+interception:
+  mode: primary
+  listen_host: "localhost"
+  listen_port: 8080
+  mitmproxy:
+    listen_port: 8081
+    auto_install_cert: true
+    auto_uninstall_cert_on_exit: true
+    cert_dir: "~/.mitmproxy"
+  https:
+    enabled: false
+    listen_port: 8443
+    ca_cert_dir: "~/.scruxy/certs"
+  passthrough:
+    enabled: false
+    max_entries: 500
+    storage_file: "~/.scruxy/passthrough_log.jsonl"
+
+providers:
+  anthropic:
+    enabled: true
+    upstream_url: "https://api.anthropic.com"
+  openai:
+    enabled: true
+    upstream_url: "https://api.openai.com"
+  custom_providers_dir: "~/.scruxy/providers"
+
+tokens:
+  prefix: "REDACTED"
+  format: "{prefix}_{category}_{n}"
+  max_token_length: 40
+
+pipeline:
+  stages:
+    - name: presidio
+      enabled: true
+      config:
+        spacy_model: "en_core_web_lg"
+        language: "en"
+        score_threshold: 0.7
+        entities:
+          - PERSON
+          - EMAIL_ADDRESS
+          - PHONE_NUMBER
+          - CREDIT_CARD
+          - US_SSN
+          - IP_ADDRESS
+        post_filter_enabled: true
+        post_filter_rules: ""  # Leave empty to use built-in defaults
+
+    - name: regex
+      enabled: true
+      config:
+        patterns_file: "~/.scruxy/regex_patterns.yaml"
+
+    - name: plugins
+      enabled: true
+      config:
+        plugin_dir: "~/.scruxy/plugins"
+        timeout_ms: 50
+        disabled_plugins: []
+
+sessions:
+  storage_dir: "~/.scruxy/sessions"
+  max_session_age_hours: 168
+  flush_interval_seconds: 5
+
+recording:
+  enabled: true
+
+ui:
+  enabled: true
+  open_browser_on_start: true
+
+logging:
+  level: "info"
+  log_dir: "~/.scruxy/logs"
+  log_scrub_events: true
+  retention_days: 7
+
+stats:
+  enabled: true
+  storage_file: "~/.scruxy/stats.json"

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Scruxy - Pipeline Tester</title>
+  <link rel="stylesheet" href="/ui/static/css/styles.css">
+</head>
+<body>
+
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-icon">S</div>
+      <span>Scrub Proxy</span>
+    </div>
+    <ul class="sidebar-nav">
+      <li><a href="/ui/"><span class="nav-icon">&#9632;</span> Dashboard</a></li>
+      <li><a href="/ui/tester"><span class="nav-icon">&#9654;</span> Tester</a></li>
+      <li><a href="/ui/plugins"><span class="nav-icon">&#9883;</span> Plugins</a></li>
+      <li><a href="/ui/providers"><span class="nav-icon">&#9729;</span> Providers</a></li>
+      <li><a href="/ui/tokens"><span class="nav-icon">&#9919;</span> Tokens</a></li>
+      <li><a href="/ui/recordings"><span class="nav-icon">&#9673;</span> Recordings</a></li>
+      <li><a href="/ui/passthrough"><span class="nav-icon">&#8644;</span> Passthrough</a></li>
+      <li><a href="/ui/logs"><span class="nav-icon">&#9776;</span> Logs</a></li>
+      <li><a href="/ui/settings"><span class="nav-icon">&#9881;</span> Settings</a></li>
+    </ul>
+    <div class="sidebar-footer">Scruxy v0.1.0</div>
+  </aside>
+
+  <div class="main-wrapper">
+    <header class="header">
+      <div class="header-title">Pipeline Tester</div>
+      <div class="header-controls">
+        <span id="proxy-status" class="status-badge online">
+          <span class="status-dot"></span> Proxy Active
+        </span>
+        <button id="theme-toggle" class="theme-toggle" title="Toggle theme">&#9788;</button>
+      </div>
+    </header>
+
+    <main class="content">
+
+      <div class="section-header mb-4">
+        <div>
+          <div class="section-title">Scrub / Unscrub Tester</div>
+          <div class="section-subtitle">Test the full pipeline round-trip on sample or custom JSON payloads.</div>
+        </div>
+      </div>
+
+      <!-- Controls -->
+      <div class="card mb-4">
+        <div class="tester-controls">
+          <div class="tester-control-row">
+            <div class="form-group" style="margin-bottom:0">
+              <label>Provider</label>
+              <select id="tester-provider"></select>
+            </div>
+            <div class="form-group" style="margin-bottom:0; flex:1">
+              <label>Stages</label>
+              <div id="tester-stages" class="flex items-center gap-3" style="flex-wrap:wrap"></div>
+            </div>
+            <button id="tester-run-btn" class="btn btn-primary">&#9654; Run Test</button>
+          </div>
+          <div class="tester-control-row mt-2">
+            <div class="form-group" style="margin-bottom:0; flex:1">
+              <label>Request Text Paths</label>
+              <input id="tester-req-paths" type="text" class="w-full" placeholder="$.system, $.messages[*].content">
+            </div>
+          </div>
+          <div class="tester-control-row mt-2">
+            <div class="form-group" style="margin-bottom:0; flex:1">
+              <label>Response Text Paths</label>
+              <input id="tester-resp-paths" type="text" class="w-full" placeholder="$.content[*].text">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mapping controls -->
+      <div class="flex items-center gap-3 mb-4">
+        <button id="tester-clear-test" class="btn btn-outline btn-sm">Clear Test Mappings</button>
+        <button id="tester-clear-all" class="btn btn-danger btn-sm">Clear All Mappings</button>
+        <span id="tester-mapping-count" class="text-xs text-muted"></span>
+      </div>
+
+      <!-- JSON Panels -->
+      <div class="tester-panels mb-4">
+        <div class="tester-panel">
+          <div class="tester-panel-header">Request JSON <span class="text-xs text-muted">(editable)</span></div>
+          <textarea id="tester-request" class="tester-textarea" spellcheck="false"></textarea>
+        </div>
+        <div class="tester-panel">
+          <div class="tester-panel-header">Scrubbed Request <span class="text-xs text-muted">(read-only)</span></div>
+          <pre id="tester-scrubbed" class="tester-pre"></pre>
+        </div>
+        <div class="tester-panel">
+          <div class="tester-panel-header">Unscrubbed Request <span class="text-xs text-muted">(round-trip)</span></div>
+          <pre id="tester-unscrubbed-request" class="tester-pre"></pre>
+        </div>
+        <div class="tester-panel">
+          <div class="tester-panel-header">Response JSON <span class="text-xs text-muted">(editable — use REDACTED_ tokens)</span></div>
+          <textarea id="tester-response" class="tester-textarea" spellcheck="false"></textarea>
+        </div>
+        <div class="tester-panel">
+          <div class="tester-panel-header">Unscrubbed Response <span class="text-xs text-muted">(read-only)</span></div>
+          <pre id="tester-unscrubbed" class="tester-pre"></pre>
+        </div>
+        <div class="tester-panel">
+          <div class="tester-panel-header">Re-scrubbed Response <span class="text-xs text-muted">(round-trip)</span></div>
+          <pre id="tester-rescrubbed" class="tester-pre"></pre>
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div id="tester-results" class="hidden">
+        <div class="card mb-4">
+          <div class="card-header">
+            <span class="card-title">Detection Results</span>
+            <span id="tester-summary" class="text-sm text-secondary"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Original Text</th>
+                  <th>Token</th>
+                  <th>Source</th>
+                  <th>Score</th>
+                  <th>Field Path</th>
+                </tr>
+              </thead>
+              <tbody id="tester-entities"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card mb-4">
+          <div class="card-header">
+            <span class="card-title">Token Map</span>
+          </div>
+          <div id="tester-token-map" class="config-list"></div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="/ui/static/js/shared.js"></script>
+  <script src="/ui/static/js/tester.js"></script>
+</body>
+</html>

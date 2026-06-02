@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Scruxy - Passthrough Log</title>
+  <link rel="stylesheet" href="/ui/static/css/styles.css">
+</head>
+<body>
+
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-icon">S</div>
+      <span>Scrub Proxy</span>
+    </div>
+    <ul class="sidebar-nav">
+      <li><a href="/ui/"><span class="nav-icon">&#9632;</span> Dashboard</a></li>
+      <li><a href="/ui/tester"><span class="nav-icon">&#9654;</span> Tester</a></li>
+      <li><a href="/ui/plugins"><span class="nav-icon">&#9883;</span> Plugins</a></li>
+      <li><a href="/ui/providers"><span class="nav-icon">&#9729;</span> Providers</a></li>
+      <li><a href="/ui/tokens"><span class="nav-icon">&#9919;</span> Tokens</a></li>
+      <li><a href="/ui/recordings"><span class="nav-icon">&#9673;</span> Recordings</a></li>
+      <li><a href="/ui/passthrough"><span class="nav-icon">&#8644;</span> Passthrough</a></li>
+      <li><a href="/ui/logs"><span class="nav-icon">&#9776;</span> Logs</a></li>
+      <li><a href="/ui/settings"><span class="nav-icon">&#9881;</span> Settings</a></li>
+    </ul>
+    <div class="sidebar-footer">Scruxy v0.1.0</div>
+  </aside>
+
+  <div class="main-wrapper">
+    <header class="header">
+      <div class="header-title">Passthrough Log</div>
+      <div class="header-controls">
+        <span id="proxy-status" class="status-badge online">
+          <span class="status-dot"></span> Proxy Active
+        </span>
+        <button id="theme-toggle" class="theme-toggle" title="Toggle theme">&#9788;</button>
+      </div>
+    </header>
+
+    <main class="content">
+
+      <!-- Status banner -->
+      <div id="pt-status-banner" class="card mb-4" style="padding:12px 16px; display:flex; align-items:center; gap:12px;">
+        <label class="toggle" style="margin:0;">
+          <input type="checkbox" id="pt-enable-toggle">
+          <span class="toggle-slider"></span>
+        </label>
+        <span id="pt-status-indicator" class="status-badge" style="font-size:0.85rem;"></span>
+        <span id="pt-status-text" class="text-sm" style="color:var(--text-secondary);"></span>
+        <span style="flex:1"></span>
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;color:var(--text-secondary);cursor:pointer;user-select:none;">
+          <input type="checkbox" id="pt-auto-refresh" checked> Auto Refresh
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;color:var(--text-secondary);cursor:pointer;user-select:none;">
+          <input type="checkbox" id="pt-beautify-json" checked> Beautify JSON
+        </label>
+        <button id="pt-clear-btn" class="btn btn-sm" style="font-size:0.78rem;">Clear Log</button>
+        <button id="pt-refresh-btn" class="btn btn-sm btn-primary" style="font-size:0.78rem;">Refresh</button>
+      </div>
+
+      <!-- Method filters -->
+      <div class="card mb-4" style="padding:8px 16px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <span style="font-size:0.78rem; color:var(--text-secondary); margin-right:4px;">Methods:</span>
+        <div id="pt-method-filters" style="display:flex; gap:4px; flex-wrap:wrap;"></div>
+      </div>
+
+      <!-- Log table -->
+      <div class="card" style="overflow-x:auto;">
+        <table class="pt-log-table" style="width:100%; border-collapse:collapse; font-size:0.82rem;">
+          <thead>
+            <tr style="text-align:left; border-bottom:1px solid var(--border-color);">
+              <th style="padding:8px 12px; white-space:nowrap;">Timestamp</th>
+              <th style="padding:8px 12px;">Method</th>
+              <th style="padding:8px 12px;">Path</th>
+              <th style="padding:8px 12px;">Status</th>
+              <th style="padding:8px 12px;">Req Type</th>
+              <th style="padding:8px 12px;">Resp Type</th>
+              <th style="padding:8px 12px;">URL</th>
+            </tr>
+          </thead>
+          <tbody id="pt-log-body">
+          </tbody>
+        </table>
+        <div id="pt-empty" class="empty-state text-sm" style="display:none; padding:32px; text-align:center;">
+          No passthrough requests logged yet.
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+<script>
+(function() {
+  "use strict";
+
+  /* ---- theme toggle (shared across all pages) ---- */
+  var themeBtn = document.getElementById("theme-toggle");
+  if (themeBtn) {
+    var saved = localStorage.getItem("scruxy-theme");
+    if (saved === "light") document.body.classList.add("light-theme");
+    themeBtn.addEventListener("click", function() {
+      document.body.classList.toggle("light-theme");
+      localStorage.setItem("scruxy-theme", document.body.classList.contains("light-theme") ? "light" : "dark");
+    });
+  }
+
+  var tbody = document.getElementById("pt-log-body");
+  var empty = document.getElementById("pt-empty");
+  var banner = document.getElementById("pt-status-indicator");
+  var bannerText = document.getElementById("pt-status-text");
+  var clearBtn = document.getElementById("pt-clear-btn");
+  var refreshBtn = document.getElementById("pt-refresh-btn");
+  var enableToggle = document.getElementById("pt-enable-toggle");
+  var autoRefreshToggle = document.getElementById("pt-auto-refresh");
+  var beautifyToggle = document.getElementById("pt-beautify-json");
+
+  var PREFS_KEY = "scruxy-passthrough-prefs";
+  var knownEntryCount = 0;      // track how many entries we've rendered
+  var expandedRows = {};         // rowId → true for expanded detail rows
+  var intervalId = null;
+  var beautifyJson = true;       // beautify JSON bodies on expand
+  var cachedData = null;         // last fetched data for re-render on toggle
+  var methodFiltersEl = document.getElementById("pt-method-filters");
+
+  // Method filter state: {method → boolean}. CONNECT hidden by default.
+  var ALL_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "CONNECT", "OPTIONS", "HEAD"];
+  var DEFAULT_HIDDEN = { "CONNECT": true };
+  var methodFilter = {};  // method → true (shown)
+
+  // ---- Preferences persistence ----
+  function savePrefs() {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify({
+        autoRefresh: autoRefreshToggle.checked,
+        beautifyJson: beautifyToggle.checked,
+        methodFilter: methodFilter,
+      }));
+    } catch (_) {}
+  }
+
+  function loadPrefs() {
+    try {
+      var raw = localStorage.getItem(PREFS_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+  }
+
+  var _prefs = loadPrefs();
+  if (_prefs && _prefs.autoRefresh === false) {
+    autoRefreshToggle.checked = false;
+  }
+  if (_prefs && _prefs.beautifyJson === false) {
+    beautifyToggle.checked = false;
+    beautifyJson = false;
+  }
+
+  // Init method filter from prefs or defaults
+  if (_prefs && _prefs.methodFilter) {
+    methodFilter = _prefs.methodFilter;
+  } else {
+    ALL_METHODS.forEach(function (m) { methodFilter[m] = !DEFAULT_HIDDEN[m]; });
+  }
+
+  function renderMethodFilters() {
+    methodFiltersEl.innerHTML = "";
+    ALL_METHODS.forEach(function (m) {
+      var active = methodFilter[m] !== false;
+      var chip = document.createElement("button");
+      chip.className = "btn btn-xs " + (active ? "btn-primary" : "btn-outline");
+      chip.textContent = m;
+      chip.style.fontSize = "0.72rem";
+      chip.style.padding = "2px 8px";
+      chip.addEventListener("click", function () {
+        methodFilter[m] = !active;
+        savePrefs();
+        renderMethodFilters();
+        if (cachedData) { knownEntryCount = 0; renderFull(cachedData); }
+      });
+      methodFiltersEl.appendChild(chip);
+    });
+  }
+  renderMethodFilters();
+
+  function isMethodVisible(method) {
+    return methodFilter[(method || "").toUpperCase()] !== false;
+  }
+
+  function statusBadge(code) {
+    if (code >= 200 && code < 300) return "color:#3fb950;";
+    if (code >= 300 && code < 400) return "color:#d29922;";
+    if (code >= 400 && code < 500) return "color:#f85149;";
+    if (code >= 500) return "color:#f85149; font-weight:600;";
+    return "";
+  }
+
+  function methodStyle(m) {
+    var colors = {GET:"#58a6ff",POST:"#3fb950",PUT:"#d29922",DELETE:"#f85149",PATCH:"#bc8cff"};
+    return "font-weight:600; color:" + (colors[m] || "var(--text-primary)") + ";";
+  }
+
+  function formatBody(s) {
+    if (!s) return "";
+    if (!beautifyJson) return s;
+    // Try trimming and parsing; handle truncated JSON gracefully
+    var trimmed = s.trim();
+    if (!trimmed) return s;
+    try { return JSON.stringify(JSON.parse(trimmed), null, 2); } catch(_) {}
+    // If truncated, try adding closing brackets to salvage partial JSON
+    return s;
+  }
+
+  function escHtml(s) {
+    var d = document.createElement("div");
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  // Build a unique key for an entry based on timestamp + method + url
+  function entryKey(e) {
+    return (e.ts || "") + "|" + (e.method || "") + "|" + (e.url || "");
+  }
+
+  function updateStatusBanner(data) {
+    var enabled = data.enabled;
+    enableToggle.checked = enabled;
+    if (enabled) {
+      banner.className = "status-badge online";
+      banner.innerHTML = '<span class="status-dot"></span> Enabled';
+      bannerText.textContent = data.count + " request" + (data.count !== 1 ? "s" : "") + " logged (in-memory, max " + (data.max_entries || 500) + ")";
+    } else {
+      banner.className = "status-badge offline";
+      banner.innerHTML = '<span class="status-dot"></span> Disabled';
+      bannerText.textContent = "Passthrough logging is disabled.";
+    }
+  }
+
+  var _preStyle = "margin:4px 0;padding:8px;background:var(--bg-tertiary);border-radius:4px;overflow-x:auto;font-size:0.75rem;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;";
+
+  function buildRowPair(e, rowId) {
+    var ts = e.ts || "";
+    try { ts = new Date(ts).toLocaleString(); } catch(_) {}
+    var cursor = "cursor:pointer;";
+    var provBadge = e.provider_disabled
+      ? ' <span style="background:#f8514930;color:#f85149;padding:1px 6px;border-radius:3px;font-size:0.7rem;margin-left:4px;">'
+        + escHtml(e.matched_provider || "") + ' (disabled)</span>'
+      : '';
+
+    var reqContentType = e.request_content_type || e.content_type || "";
+    var respContentType = e.response_content_type || "";
+
+    // Summary row
+    var summaryRow = document.createElement("tr");
+    summaryRow.setAttribute("data-row", rowId);
+    summaryRow.style.cssText = "border-bottom:1px solid var(--border-color);" + cursor;
+    summaryRow.innerHTML =
+      '<td style="padding:6px 12px; white-space:nowrap; color:var(--text-muted);">\u25B6 ' + escHtml(ts) + '</td>'
+      + '<td style="padding:6px 12px; ' + methodStyle(e.method) + '">' + escHtml(e.method || "") + '</td>'
+      + '<td style="padding:6px 12px; font-family:var(--font-mono); word-break:break-all;">' + escHtml(e.path || "") + provBadge + '</td>'
+      + '<td style="padding:6px 12px; ' + statusBadge(e.status) + '">' + (e.status || "") + '</td>'
+      + '<td style="padding:6px 12px; color:var(--text-secondary); font-size:0.75rem;">' + escHtml(reqContentType || "\u2014") + '</td>'
+      + '<td style="padding:6px 12px; color:var(--text-secondary); font-size:0.75rem;">' + escHtml(respContentType || "\u2014") + '</td>'
+      + '<td style="padding:6px 12px; font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted); word-break:break-all;">' + escHtml(e.url || "") + '</td>';
+
+    // Detail row — side by side request/response
+    var detailRow = document.createElement("tr");
+    detailRow.id = rowId;
+    detailRow.style.display = expandedRows[rowId] ? "" : "none";
+
+    var bodyHtml = '';
+    if (e.provider_disabled) {
+      bodyHtml += '<div style="margin-bottom:8px;padding:6px 10px;background:#f8514915;border-left:3px solid #f85149;border-radius:3px;">'
+        + '<strong style="color:#f85149;">\u26A0 Matched provider: ' + escHtml(e.matched_provider || "") + '</strong>'
+        + ' \u2014 This request matched a scrubbing pattern but the provider is disabled. Enable it to scrub this traffic.</div>';
+    }
+
+    var reqBody = e.request_body || "";
+    var respBody = e.response_body || "";
+    var fmtReq = formatBody(reqBody);
+    var fmtResp = formatBody(respBody);
+
+    bodyHtml += '<div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">';
+
+    // Request panel
+    bodyHtml += '<div>'
+      + '<strong style="color:var(--text-secondary); font-size:0.78rem;">Request Body</strong>'
+      + (reqContentType ? '<span style="color:var(--text-muted); font-size:0.7rem; margin-left:8px;">' + escHtml(reqContentType) + '</span>' : '')
+      + '<pre style="' + _preStyle + '">' + (fmtReq ? escHtml(fmtReq) : '<span style="color:var(--text-muted); font-style:italic;">(empty)</span>') + '</pre>'
+      + '</div>';
+
+    // Response panel
+    bodyHtml += '<div>'
+      + '<strong style="color:var(--text-secondary); font-size:0.78rem;">Response Body</strong>'
+      + (respContentType ? '<span style="color:var(--text-muted); font-size:0.7rem; margin-left:8px;">' + escHtml(respContentType) + '</span>' : '')
+      + '<span style="color:var(--text-muted); font-size:0.7rem; margin-left:8px;">' + (e.status || "") + '</span>'
+      + '<pre style="' + _preStyle + '">' + (fmtResp ? escHtml(fmtResp) : '<span style="color:var(--text-muted); font-style:italic;">(empty)</span>') + '</pre>'
+      + '</div>';
+
+    bodyHtml += '</div>';
+
+    detailRow.innerHTML = '<td colspan="7" style="padding:8px 12px;">' + bodyHtml + '</td>';
+
+    // Update arrow if expanded
+    if (expandedRows[rowId]) {
+      summaryRow.querySelector("td").innerHTML = summaryRow.querySelector("td").innerHTML.replace("\u25B6", "\u25BC");
+    }
+
+    return { summary: summaryRow, detail: detailRow };
+  }
+
+  // Full render — used on first load and after clear
+  function renderFull(data) {
+    cachedData = data;
+    updateStatusBanner(data);
+
+    var entries = data.entries || [];
+    if (entries.length === 0) {
+      tbody.innerHTML = "";
+      empty.style.display = "block";
+      knownEntryCount = 0;
+      return;
+    }
+    empty.style.display = "none";
+    tbody.innerHTML = "";
+
+    // Show newest first, filtered by method
+    for (var i = entries.length - 1; i >= 0; i--) {
+      if (!isMethodVisible(entries[i].method)) continue;
+      var rowId = "pt-row-" + i;
+      var pair = buildRowPair(entries[i], rowId);
+      tbody.appendChild(pair.summary);
+      tbody.appendChild(pair.detail);
+    }
+    knownEntryCount = entries.length;
+  }
+
+  // Incremental render — prepend only new entries, preserve expanded state
+  function renderIncremental(data) {
+    cachedData = data;
+    updateStatusBanner(data);
+
+    var entries = data.entries || [];
+    if (entries.length === 0) {
+      return; // nothing to do if empty; don't clobber existing DOM
+    }
+
+    var newCount = entries.length - knownEntryCount;
+    if (newCount <= 0) {
+      // No new entries; just update status banner (already done)
+      return;
+    }
+
+    empty.style.display = "none";
+
+    // New entries are at the end of the array (newest). Prepend them newest-first.
+    var fragment = document.createDocumentFragment();
+    for (var i = entries.length - 1; i >= entries.length - newCount; i--) {
+      if (!isMethodVisible(entries[i].method)) continue;
+      var rowId = "pt-row-" + i;
+      var pair = buildRowPair(entries[i], rowId);
+      fragment.appendChild(pair.summary);
+      fragment.appendChild(pair.detail);
+    }
+
+    // Prepend new rows before existing content
+    if (tbody.firstChild) {
+      tbody.insertBefore(fragment, tbody.firstChild);
+    } else {
+      tbody.appendChild(fragment);
+    }
+    knownEntryCount = entries.length;
+  }
+
+  // Click handler (event delegation on tbody)
+  tbody.addEventListener("click", function(ev) {
+    var tr = ev.target.closest("tr[data-row]");
+    if (!tr) return;
+    var detailId = tr.getAttribute("data-row");
+    var detail = document.getElementById(detailId);
+    if (!detail) return;
+    var arrow = tr.querySelector("td");
+    if (detail.style.display === "none") {
+      detail.style.display = "";
+      if (arrow) arrow.innerHTML = arrow.innerHTML.replace("\u25B6", "\u25BC");
+      expandedRows[detailId] = true;
+    } else {
+      detail.style.display = "none";
+      if (arrow) arrow.innerHTML = arrow.innerHTML.replace("\u25BC", "\u25B6");
+      delete expandedRows[detailId];
+    }
+  });
+
+  function loadFull() {
+    fetch("/ui/api/passthrough-log")
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        renderFull(data);
+      })
+      .catch(function() {
+        tbody.innerHTML = "";
+        empty.style.display = "block";
+        empty.textContent = "Failed to load passthrough log.";
+      });
+  }
+
+  function loadIncremental() {
+    fetch("/ui/api/passthrough-log")
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        renderIncremental(data);
+      })
+      .catch(function() { /* silently ignore incremental failures */ });
+  }
+
+  // ---- Auto-refresh management ----
+  function startAutoRefresh() {
+    stopAutoRefresh();
+    intervalId = setInterval(loadIncremental, 5000);
+  }
+
+  function stopAutoRefresh() {
+    if (intervalId) {
+      clearInterval(intervalId);
+      intervalId = null;
+    }
+  }
+
+  autoRefreshToggle.addEventListener("change", function() {
+    savePrefs();
+    if (autoRefreshToggle.checked) {
+      startAutoRefresh();
+    } else {
+      stopAutoRefresh();
+    }
+  });
+
+  beautifyToggle.addEventListener("change", function() {
+    beautifyJson = beautifyToggle.checked;
+    savePrefs();
+    // Re-render from cached data to apply the new formatting
+    if (cachedData) {
+      knownEntryCount = 0;
+      renderFull(cachedData);
+    }
+  });
+
+  enableToggle.addEventListener("change", function() {
+    var newVal = enableToggle.checked;
+    fetch("/ui/api/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ interception: { passthrough: { enabled: newVal } } }),
+    })
+    .then(function(r) {
+      if (!r.ok) throw new Error("Save failed");
+      return fetch("/ui/api/passthrough-toggle", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: newVal }),
+      });
+    })
+    .then(function() { loadFull(); })
+    .catch(function() {
+      enableToggle.checked = !newVal;
+    });
+  });
+
+  clearBtn.addEventListener("click", function() {
+    fetch("/ui/api/passthrough-log", {method:"DELETE"})
+      .then(function() {
+        knownEntryCount = 0;
+        expandedRows = {};
+        loadFull();
+      });
+  });
+
+  refreshBtn.addEventListener("click", function() {
+    knownEntryCount = 0;
+    expandedRows = {};
+    loadFull();
+  });
+
+  // Initial load (always full)
+  loadFull();
+  if (autoRefreshToggle.checked) {
+    startAutoRefresh();
+  }
+})();
+</script>
+
+</body>
+</html>

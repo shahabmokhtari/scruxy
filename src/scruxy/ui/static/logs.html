@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Scruxy - Logs &amp; Statistics</title>
+  <link rel="stylesheet" href="/ui/static/css/styles.css">
+</head>
+<body>
+
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-icon">S</div>
+      <span>Scrub Proxy</span>
+    </div>
+    <ul class="sidebar-nav">
+      <li><a href="/ui/"><span class="nav-icon">&#9632;</span> Dashboard</a></li>
+      <li><a href="/ui/tester"><span class="nav-icon">&#9654;</span> Tester</a></li>
+      <li><a href="/ui/plugins"><span class="nav-icon">&#9883;</span> Plugins</a></li>
+      <li><a href="/ui/providers"><span class="nav-icon">&#9729;</span> Providers</a></li>
+      <li><a href="/ui/tokens"><span class="nav-icon">&#9919;</span> Tokens</a></li>
+      <li><a href="/ui/recordings"><span class="nav-icon">&#9673;</span> Recordings</a></li>
+      <li><a href="/ui/passthrough"><span class="nav-icon">&#8644;</span> Passthrough</a></li>
+      <li><a href="/ui/logs"><span class="nav-icon">&#9776;</span> Logs</a></li>
+      <li><a href="/ui/settings"><span class="nav-icon">&#9881;</span> Settings</a></li>
+    </ul>
+    <div class="sidebar-footer">Scruxy v0.1.0</div>
+  </aside>
+
+  <div class="main-wrapper">
+    <header class="header">
+      <div class="header-title">Logs &amp; Statistics</div>
+      <div class="header-controls">
+        <span id="proxy-status" class="status-badge online">
+          <span class="status-dot"></span> Proxy Active
+        </span>
+        <button id="theme-toggle" class="theme-toggle" title="Toggle theme">&#9788;</button>
+      </div>
+    </header>
+
+    <main class="content">
+
+      <!-- Stats summary -->
+      <div class="grid grid-3 mb-4">
+        <div class="card stat-card">
+          <span class="stat-label">Total Requests</span>
+          <span class="stat-value" id="log-total-requests">0</span>
+        </div>
+        <div class="card stat-card">
+          <span class="stat-label">Total Entities</span>
+          <span class="stat-value" id="log-total-entities">0</span>
+        </div>
+        <div class="card stat-card">
+          <span class="stat-label">Uptime</span>
+          <span class="stat-value" id="log-uptime">--</span>
+        </div>
+      </div>
+
+      <!-- Charts -->
+      <div class="grid grid-2 mb-4">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Entities by Type</span>
+          </div>
+          <div id="entities-by-type-chart">
+            <div class="empty-state text-sm">No data yet</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Requests by Provider</span>
+          </div>
+          <div id="requests-by-provider-chart">
+            <div class="empty-state text-sm">No data yet</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Application logs -->
+      <div class="card mb-4">
+        <div class="card-header" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+          <span class="card-title">Application Logs</span>
+          <span style="font-size:11px;color:var(--text-secondary);">Level:</span>
+          <div id="log-level-filters" style="display:flex;gap:4px;"></div>
+          <span style="flex:1"></span>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);">
+            <input type="checkbox" id="chk-log-autoscroll" checked> Auto-scroll
+          </label>
+          <button id="btn-clear-logs" class="btn btn-xs" style="font-size:11px;">Clear</button>
+        </div>
+        <div id="app-log-container" style="max-height:400px;overflow-y:auto;background:var(--bg-input);font-family:'Cascadia Code','Fira Code',monospace;font-size:12px;line-height:1.6;padding:8px;">
+          <div class="empty-state text-sm">Waiting for logs...</div>
+        </div>
+      </div>
+
+      <!-- PII Event log table -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">PII Detection Events</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Session</th>
+                <th>Provider</th>
+                <th>Entity Type</th>
+                <th>Direction</th>
+                <th>Confidence</th>
+              </tr>
+            </thead>
+            <tbody id="event-log-table">
+              <tr><td colspan="6" class="empty-state text-sm">No events recorded</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="/ui/static/js/shared.js"></script>
+  <script src="/ui/static/js/logs.js"></script>
+</body>
+</html>

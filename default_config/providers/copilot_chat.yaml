@@ -1,0 +1,29 @@
+name: copilot_chat
+display_name: "GitHub Copilot Chat Completions"
+upstream_url: "https://api.enterprise.githubcopilot.com"
+url_patterns:
+  - "*githubcopilot.com/v1/chat/completions"
+  - "*githubcopilot.com/chat/completions"
+auth_headers:
+  - "authorization"
+  - "api-key"
+  - "openai-organization"
+session_id_headers:
+  - "x-client-session-id"
+  - "x-request-id"
+  - "x-session-id"
+  - "openai-conversation-id"
+request_text_paths:
+  - "$.messages[*].content"
+  - "$.messages[*].content[*].text"
+  - "$.messages[*].tool_calls[*].function.arguments"
+response_text_paths:
+  - "$.choices[*].message.content"
+  - "$.choices[*].message.tool_calls[*].function.arguments"
+sse_events:
+  text_delta:
+    type_match: null
+    text_path: "choices[0].delta.content"
+  tool_delta:
+    type_match: null
+    text_path: "choices[0].delta.tool_calls[0].function.arguments"

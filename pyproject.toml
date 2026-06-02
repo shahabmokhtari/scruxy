@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scruxy"
+version = "0.1.0"
+description = "A standalone, multi-provider, local Python proxy that scrubs PII from LLM API traffic"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "fastapi>=0.109",
+    "uvicorn[standard]>=0.27",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+    "jsonpath-ng>=1.6",
+    "presidio-analyzer>=2.2",
+    "spacy>=3.7",
+    "pydantic>=2.0",
+    "faker>=33.0",
+    "aiosqlite>=0.20",
+    "cryptography>=42.0",
+    "tornado>=6.4.2",
+    "regex>=2024.0",
+]
+
+[project.optional-dependencies]
+mitmproxy = ["mitmproxy>=12.0; python_version >= '3.12'"]
+# OpenAI Privacy Filter (OPF) — optional ML-based PII detector that
+# wraps the open-source openai/privacy-filter model (1.5B params,
+# 50M active, MoE).  Pulled from upstream via VCS install:
+#   pip install 'scruxy[opf]'
+# Adds ~2GB of torch dependencies + ~1.5GB checkpoint downloaded on
+# first use to ~/.opf/privacy_filter/.
+#
+# Note: the upstream package's distribution name is ``opf`` (the
+# package directory in the repo), not ``openai-privacy-filter``.  The
+# ``opf @ git+...`` syntax is the only form uv accepts here because
+# the metadata name in the upstream pyproject.toml is ``opf``.
+opf = [
+    "opf @ git+https://github.com/openai/privacy-filter@main",
+]
+
+[project.scripts]
+scruxy = "scruxy.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.0",
+    "ruff>=0.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scruxy"]
+
+# hatchling rejects ``opf @ git+https://...`` direct references unless
+# this opt-in flag is set.  We use exactly one such reference for the
+# ``[opf]`` extra; everything else is on PyPI.
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100

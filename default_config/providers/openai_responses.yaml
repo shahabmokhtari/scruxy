@@ -1,0 +1,33 @@
+name: openai_responses
+display_name: "OpenAI Responses API (Copilot, Azure, OpenAI)"
+upstream_url: "https://api.openai.com"
+url_patterns:
+  - "*/v1/responses"
+  - "*/responses"
+match_headers:
+  - "authorization"
+auth_headers:
+  - "authorization"
+  - "api-key"
+  - "openai-organization"
+session_id_headers:
+  - "x-request-id"
+  - "x-session-id"
+  - "openai-conversation-id"
+request_text_paths:
+  - "$.input"
+  - "$.input[*].content"
+  - "$.input[*].content[*].text"
+  - "$.input[*].output"
+  - "$.input[*].arguments"
+  - "$.instructions"
+response_text_paths:
+  - "$.output[*].content[*].text"
+  - "$.output[*].arguments"
+sse_events:
+  response_text_delta:
+    type_match: "response.output_text.delta"
+    text_path: "delta"
+  response_function_delta:
+    type_match: "response.function_call_arguments.delta"
+    text_path: "delta"

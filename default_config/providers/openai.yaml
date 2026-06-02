@@ -1,0 +1,30 @@
+name: openai
+display_name: "OpenAI-Compatible (Copilot, Azure, OpenAI)"
+upstream_url: "https://api.openai.com"
+url_patterns:
+  - "*/v1/chat/completions"
+  - "*/chat/completions"
+  - "*openai.azure.com/openai/deployments/*/chat/completions*"
+match_headers:
+  - "authorization"
+auth_headers:
+  - "authorization"
+  - "api-key"
+  - "openai-organization"
+session_id_headers:
+  - "x-request-id"
+  - "x-session-id"
+  - "openai-conversation-id"
+request_text_paths:
+  - "$.messages[*].content"
+  - "$.messages[*].content[*].text"
+response_text_paths:
+  - "$.choices[*].message.content"
+  - "$.choices[*].message.tool_calls[*].function.arguments"
+sse_events:
+  text_delta:
+    type_match: null
+    text_path: "choices[0].delta.content"
+  tool_delta:
+    type_match: null
+    text_path: "choices[0].delta.tool_calls[0].function.arguments"

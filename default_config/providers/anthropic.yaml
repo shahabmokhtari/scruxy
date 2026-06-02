@@ -1,0 +1,43 @@
+name: anthropic
+display_name: "Anthropic Claude"
+upstream_url: "https://api.anthropic.com"
+url_patterns:
+  - "*/v1/messages"
+  - "*/v1/messages?*"
+match_headers:
+  - "anthropic-version"
+auth_headers:
+  - "authorization"
+  - "x-api-key"
+  - "anthropic-version"
+  - "anthropic-beta"
+session_id_headers:
+  - "x-session-id"
+  - "anthropic-beta"
+session_id_body_path: "metadata.user_id"
+session_id_body_regex: "session_([0-9a-f-]+)"
+session_id_body_prefix: "claude-"
+request_text_paths:
+  - "$.system"
+  - "$.system[*].text"
+  - "$.messages[*].content"
+  - "$.messages[*].content[*].text"
+  - "$.messages[*].content[*].content"
+response_text_paths:
+  - "$.content[*].text"
+sse_events:
+  text_delta:
+    type_match: "content_block_delta"
+    delta_type_match: "text_delta"
+    text_path: "delta.text"
+  input_json_delta:
+    type_match: "content_block_delta"
+    delta_type_match: "input_json_delta"
+    text_path: "delta.partial_json"
+  # 72-1 fix: extended-thinking SSE deltas carry text in
+  # ``delta.thinking`` for incremental thinking content.  Without
+  # this entry the SSE stream forwards thinking text raw.
+  thinking_delta:
+    type_match: "content_block_delta"
+    delta_type_match: "thinking_delta"
+    text_path: "delta.thinking"
