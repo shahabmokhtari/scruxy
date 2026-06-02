@@ -26,12 +26,7 @@ Then start the proxy:
 scruxy
 ```
 
-Make sure your upstream API keys are configured:
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-export OPENAI_API_KEY="sk-..."
-```
+Scruxy is a transparent proxy — it forwards the `Authorization` header from your AI assistant (Claude Code, Copilot, etc.) to the upstream API unchanged. No API keys need to be configured on Scruxy itself; just make sure your assistant is already authenticated with its upstream provider.
 
 ## Capture Modes
 
