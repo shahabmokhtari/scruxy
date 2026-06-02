@@ -11,13 +11,13 @@ Scruxy is a local Python proxy that sits between your AI coding assistant (Claud
 Install directly from GitHub:
 
 ```bash
-pip install git+https://github.com/{owner}/scruxy
+pip install git+https://github.com/shahabmokhtari/scruxy
 ```
 
 Or run without installing using `uvx`:
 
 ```bash
-uvx --from git+https://github.com/{owner}/scruxy scruxy
+uvx --from git+https://github.com/shahabmokhtari/scruxy scruxy
 ```
 
 Then start the proxy:
@@ -491,7 +491,7 @@ This runs `pip install` for the `[opf]` extra in a worker thread, then forces a 
 
 ```bash
 # Clone and install in dev mode
-git clone https://github.com/{owner}/scruxy.git
+git clone https://github.com/shahabmokhtari/scruxy.git
 cd scruxy
 pip install -e ".[dev]"
 
