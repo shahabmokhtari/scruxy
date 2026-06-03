@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Scruxy** — a standalone, multi-provider, local Python proxy that intercepts LLM API traffic from AI coding assistants (Claude Code, GitHub Copilot), scrubs PII before it leaves the machine, forwards scrubbed requests to upstream APIs, and unscrubs responses so users see original values transparently.
 
-**Status:** Fully implemented and functional. All core modules are built and tested (1,190+ tests).
+**Status:** Fully implemented and functional. All core modules are built and tested (1,600+ tests).
 
 **Design Spec:** `docs/plans/2026-03-03-scrubbing-proxy-design.md` — the original design reference. The implementation is faithful to this spec with enhancements (SQLite token storage, forward proxy MITM, incremental UI updates, per-stage pipeline profiling, Presidio caching, cross-field second-pass scrub).
 
@@ -67,23 +67,25 @@ Always follow this flow for feature work and bug fixes:
 - SQLite (via aiosqlite) for persistent token storage; optional in-memory-only mode
 - Vanilla HTML/CSS/JS frontend (no build step, no CDN)
 - YAML for config, JSONL for recordings
-- Optional: mitmproxy for HTTPS interception fallback
 
 ## Build & Run Commands
 
 ```bash
 pip install -e .                              # Install in dev mode
-pip install -e ".[mitmproxy]"                 # With mitmproxy fallback
 python -m spacy download en_core_web_lg       # Required NLP model
 
 scruxy                               # Start proxy (default: localhost:8080)
 scruxy --config path/to/config.yaml  # Custom config
-scruxy --mode mitmproxy              # Use mitmproxy fallback
+scruxy --no-browser                  # Don't open dashboard on startup
+scruxy --no-https                    # Disable HTTPS reverse proxy
+scruxy --no-forward-proxy            # Disable HTTP forward proxy
 
 pytest                                        # Run all tests
 pytest tests/test_token_map.py                # Run a single test file
 pytest tests/test_token_map.py::test_name -v  # Run a single test
 ```
+
+The `mitmproxy` extra (`pip install -e ".[mitmproxy]"`) is still wired up, but `interception.mode = "mitmproxy"` is legacy — `app.py` auto-migrates it to `"primary"` at startup with a `WARNING`. All scrubbing now flows through the in-process reverse + forward proxies.
 
 ## Architecture
 
