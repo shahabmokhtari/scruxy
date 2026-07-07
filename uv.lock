@@ -2277,7 +2277,6 @@ dependencies = [
     { name = "pyyaml" },
     { name = "regex" },
     { name = "spacy" },
-    { name = "tornado" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -2312,7 +2311,6 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "regex", specifier = ">=2024.0" },
     { name = "spacy", specifier = ">=3.7" },
-    { name = "tornado", specifier = ">=6.4.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
 ]
 provides-extras = ["mitmproxy", "opf"]
