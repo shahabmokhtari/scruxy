@@ -176,11 +176,32 @@ class SSEStreamUnscrubber:
                 pass
 
         # Track the last event_data that contained text, so we can rebuild
-        # a proper SSE event when flushing the buffer at end-of-stream.
+        # a proper SSE event when flushing the buffer.
         last_event_data: str | None = None
+        # ``event:`` line of the last TEXT event.  A flush before a
+        # terminal/structural event reproduces a complete, correctly-typed
+        # event using this line.  Anthropic pairs ``event:`` + ``data:``; a
+        # bare ``data:`` content_block_delta emitted AFTER ``message_stop``
+        # corrupts framing and the client rejects the whole response as a
+        # "server error".
+        last_text_event_line: str | None = None
+        # ``event:`` line awaiting its ``data:`` line.  Deferred so a buffer
+        # flush can be injected BEFORE a structural event's own event line.
+        pending_event_line: str | None = None
 
         async for raw_line in response_stream:
             line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+
+            # Defer ``event:`` lines until the following ``data:`` line is
+            # classified, so held-back text can be flushed (as a complete
+            # text event) ahead of a terminal/structural event.
+            if line.startswith("event:"):
+                if pending_event_line is not None:
+                    # Two event lines with no data between (malformed
+                    # upstream) — emit the first so it isn't dropped.
+                    yield pending_event_line.encode("utf-8")
+                pending_event_line = line
+                continue
 
             # Process "data:" lines (with or without space after colon per SSE spec).
             if line.startswith("data: "):
@@ -188,6 +209,11 @@ class SSEStreamUnscrubber:
             elif line.startswith("data:"):
                 event_data = line[5:]
             else:
+                # Blank separator / comment / id / retry — emit any pending
+                # event line first so framing order is preserved.
+                if pending_event_line is not None:
+                    yield pending_event_line.encode("utf-8")
+                    pending_event_line = None
                 yield line.encode("utf-8") if isinstance(line, str) else raw_line
                 continue
 
@@ -195,34 +221,36 @@ class SSEStreamUnscrubber:
             # yielding the marker so the client receives all text data
             # before it sees [DONE] and stops reading.
             if event_data.strip() == "[DONE]":
-                if self.buffer and last_event_data is not None:
-                    flushed = self._flush_buffer()
-                    unscrubbed = deanonymize_text(flushed, self.token_map)
-                    if unscrubbed:
-                        rebuilt = self.provider.rebuild_sse_event(
-                            last_event_data, unscrubbed,
-                        )
-                        yield f"data: {rebuilt}".encode("utf-8")
-                        # SSE events MUST be terminated by a blank line
-                        # ("\n\n").  Both proxy callers append a single
-                        # "\n" to each yielded chunk, so we need an extra
-                        # empty chunk here to produce the second newline
-                        # between the synthesized flush event and the
-                        # [DONE] sentinel.  Without this, EventSource and
-                        # OpenAI's Python Stream parser treat the two
-                        # data: lines as one un-dispatched event whose
-                        # data field becomes "{flushed}\n[DONE]" — the
-                        # flushed text is lost and [DONE] is no longer
-                        # recognised.
-                        yield b""
+                for chunk in self._build_flush_chunks(last_text_event_line, last_event_data):
+                    yield chunk
+                if pending_event_line is not None:
+                    yield pending_event_line.encode("utf-8")
+                    pending_event_line = None
                 yield line.encode("utf-8") if isinstance(line, str) else raw_line
                 continue
 
             # Let the provider parse the SSE event.
             sse_field = self.provider.parse_sse_event(event_data)
             if sse_field is None:
-                # Provider couldn't extract a specific text field (e.g. a
-                # "done" or "completed" event that carries accumulated text).
+                # Structural / non-text event.  Flush held-back text ONLY
+                # before a genuinely TERMINAL event (end of a content block
+                # or message: content_block_stop, message_stop,
+                # response.completed, response.output_text.done, ...), so
+                # deferred token fragments are delivered BEFORE the terminal
+                # event — never after it (which corrupts SSE framing and
+                # makes the client reject the whole response as a server
+                # error).  TRANSIENT structural events MUST NOT trigger a
+                # flush: Anthropic sends ``ping`` keep-alives BETWEEN
+                # ``content_block_delta`` events, and a redaction token split
+                # across two deltas (e.g. ``REDACTED`` + ``_PERSON_1``) would
+                # otherwise be flushed half-formed and leak unreplaced.
+                if self._is_terminal_sse_event(event_data):
+                    for chunk in self._build_flush_chunks(last_text_event_line, last_event_data):
+                        yield chunk
+                # Emit this event's own (deferred) event line, then its data.
+                if pending_event_line is not None:
+                    yield pending_event_line.encode("utf-8")
+                    pending_event_line = None
                 # Parse as JSON, recursively deanonymize all string values,
                 # and re-serialize.  This is safe for JSON encoding and
                 # covers deeply nested response objects.
@@ -242,6 +270,13 @@ class SSEStreamUnscrubber:
                 yield rebuilt_line.encode("utf-8")
                 continue
 
+            # Text event: emit its (deferred) event line and remember it so a
+            # later flush can reproduce a correctly-typed event.
+            if pending_event_line is not None:
+                yield pending_event_line.encode("utf-8")
+                last_text_event_line = pending_event_line
+                pending_event_line = None
+
             last_event_data = event_data
 
             # Feed text through rolling buffer.
@@ -255,20 +290,13 @@ class SSEStreamUnscrubber:
             rebuilt_line = f"data: {rebuilt_event_data}"
             yield rebuilt_line.encode("utf-8")
 
-        # Flush remaining buffer content at end of stream.  Wrap the
-        # flushed text in a proper SSE event so the client can parse it.
-        # See the [DONE] branch above: emit a blank chunk after the
-        # synthesized event so callers' "chunk + b'\n'" framing produces
-        # the spec-required "\n\n" event terminator.
-        if self.buffer and last_event_data is not None:
-            flushed = self._flush_buffer()
-            unscrubbed = deanonymize_text(flushed, self.token_map)
-            if unscrubbed:
-                rebuilt = self.provider.rebuild_sse_event(
-                    last_event_data, unscrubbed,
-                )
-                yield f"data: {rebuilt}".encode("utf-8")
-                yield b""
+        # Flush remaining buffer content at end of stream (e.g. OpenAI with
+        # no [DONE], or a stream that ended without a terminal event).  Wrap
+        # the flushed text in a proper SSE event so the client can parse it.
+        for chunk in self._build_flush_chunks(last_text_event_line, last_event_data):
+            yield chunk
+        if pending_event_line is not None:
+            yield pending_event_line.encode("utf-8")
 
     # -- buffer management -------------------------------------------------
 
@@ -289,6 +317,88 @@ class SSEStreamUnscrubber:
         self.buffer = ""
         return remaining
 
+    def _build_flush_chunks(
+        self, event_line: str | None, last_event_data: str | None
+    ) -> list[bytes]:
+        """Return SSE chunks delivering any held-back buffer text.
+
+        The held-back text is emitted as a *complete* event: an optional
+        ``event:`` line (required by Anthropic, which pairs ``event:`` +
+        ``data:``), the rebuilt ``data:`` line, then an empty chunk so the
+        caller's ``chunk + b"\\n"`` framing produces the spec-required
+        ``\\n\\n`` terminator.  Returns ``[]`` (and leaves the buffer
+        untouched) when there is nothing to flush.  Clears the buffer
+        otherwise, so repeated calls are idempotent.
+        """
+        if not self.buffer or last_event_data is None:
+            return []
+        flushed = self._flush_buffer()
+        unscrubbed = deanonymize_text(flushed, self.token_map)
+        if not unscrubbed:
+            return []
+        rebuilt = self.provider.rebuild_sse_event(last_event_data, unscrubbed)
+        chunks: list[bytes] = []
+        if event_line is not None:
+            chunks.append(event_line.encode("utf-8"))
+        chunks.append(f"data: {rebuilt}".encode("utf-8"))
+        chunks.append(b"")
+        return chunks
+
+    # Event ``type`` values that mark the end of a content block or message,
+    # after which no further text deltas arrive for the current block.  The
+    # rolling buffer is flushed before these (but NOT before transient
+    # structural events such as Anthropic ``ping`` keep-alives).
+    _TERMINAL_EVENT_TYPES = frozenset({
+        "message_stop",            # Anthropic: end of message
+        "content_block_stop",      # Anthropic: end of a content block
+        "response.completed",      # OpenAI Responses: stream done
+        "response.incomplete",
+        "response.failed",
+    })
+
+    def _is_terminal_sse_event(self, event_data: str) -> bool:
+        """Return whether *event_data* is a content/message-terminating event.
+
+        Terminal events end a content block or the whole message, so it is
+        safe (and necessary) to flush any held-back token text before them.
+        Transient structural events (keep-alive ``ping``, ``*_start``,
+        ``*.delta`` control frames, ``*.added`` …) return ``False`` so the
+        rolling buffer survives and a token split across deltas still
+        reassembles.
+        """
+        try:
+            obj = _json.loads(event_data)
+        except (_json.JSONDecodeError, TypeError, ValueError):
+            return False
+        if not isinstance(obj, dict):
+            return False
+        etype = obj.get("type")
+        if not isinstance(etype, str):
+            return False
+        if etype in self._TERMINAL_EVENT_TYPES:
+            return True
+        # Anthropic ``signature_delta`` is a non-text ``content_block_delta``
+        # carrying the thinking-block signature; it terminates that block's
+        # thinking text (no more thinking deltas follow).  Held thinking text
+        # must flush BEFORE it so content is never reordered after its
+        # signature.
+        delta = obj.get("delta")
+        if isinstance(delta, dict) and delta.get("type") == "signature_delta":
+            return True
+        # Generic terminators: ``*_stop`` (Anthropic content_block_stop /
+        # message_stop) and ``*.done`` (OpenAI Responses output_text /
+        # content_part / output_item / refusal terminators).
+        #
+        # A generic ``.completed`` rule is intentionally NOT used: OpenAI
+        # Responses emits non-terminal tool-status events that end in
+        # ``.completed`` (``response.web_search_call.completed``,
+        # ``response.file_search_call.completed``, ``response.mcp_call
+        # .completed``) which could land BETWEEN text deltas and would flush
+        # a half-formed split token, leaking it unreplaced.  The only
+        # terminal ``.completed`` event — ``response.completed`` — is covered
+        # explicitly by ``_TERMINAL_EVENT_TYPES`` above.
+        return etype.endswith("_stop") or etype.endswith(".done")
+
     def _extract_safe(self) -> str:
         """Determine how much of ``self.buffer`` is safe to emit.
 
@@ -300,9 +410,9 @@ class SSEStreamUnscrubber:
         1. Scan backwards from the end of the buffer looking for a position
            where the tail is a prefix of some token in the trie.
         2. Everything before that position is safe to emit.
-        3. If no prefix match is found but the buffer exceeds
-           ``buffer_size``, emit everything up to the last
-           ``buffer_size`` characters.
+        3. If no trailing partial token is found, the whole buffer is safe to
+           emit (the scan window of ``buffer_size + 1`` chars covers every
+           possible incomplete token, since tokens are <= ``buffer_size``).
         """
         trie_starts = self._trie.root.children
         if not trie_starts:
@@ -345,14 +455,22 @@ class SSEStreamUnscrubber:
             self.buffer = self.buffer[partial_start:]
             return safe
 
-        # No partial token detected.
-        if len(self.buffer) > self.buffer_size:
-            split_at = len(self.buffer) - self.buffer_size
-            safe = self.buffer[:split_at]
-            self.buffer = self.buffer[split_at:]
-            return safe
-
-        # Buffer is short and has no partial token — emit it.
+        # No trailing partial token exists.  The backward scan above covers
+        # the last ``buffer_size + 1`` characters, and every token is at most
+        # ``buffer_size`` characters long, so a ``None`` result guarantees
+        # there is no incomplete token at the buffer tail.  The ENTIRE buffer
+        # is therefore safe to emit: ``deanonymize_text`` resolves any
+        # complete tokens, and none can extend into a future chunk.
+        #
+        # We must NOT blindly split at ``len - buffer_size`` here.  A
+        # COMPLETE token straddling that offset (start before it, end after
+        # it) is not flagged as a partial — its form plus the trailing text
+        # is not a token prefix — so the split would cut it in half.  Each
+        # half then fails to match and the client visually reassembles the
+        # raw token (a PII-token leak, e.g. ``REDACTED_PERSON_11`` shown to
+        # the user).  Emitting the whole buffer avoids that, and memory stays
+        # bounded because the retain path above only ever holds back a single
+        # partial token (<= ``buffer_size`` chars).
         safe = self.buffer
         self.buffer = ""
         return safe

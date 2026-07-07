@@ -68,6 +68,8 @@ export HTTPS_PROXY=http://localhost:8081
 
 This mode requires trusting Scruxy's CA certificate (see [CA Certificate Trust](#ca-certificate-trust)).
 
+> **Local services pass through untouched.** When `HTTP_PROXY`/`HTTPS_PROXY` point at Scruxy, the harness routes *all* traffic through it — including requests to local services on loopback addresses (`localhost` / `127.0.0.1` / `::1`), such as locally-hosted MCP servers. Scruxy forwards loopback traffic through transparently without scrubbing (it never leaves the machine), so local MCP servers keep working. Only the app's own admin/UI surface on the main port stays blocked.
+
 ### Choosing a Mode
 
 | Mode | Best for | Requires CA trust? | Enabled by default? |

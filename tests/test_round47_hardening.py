@@ -600,33 +600,39 @@ class TestA14_UiSseCap:
 
 class TestA15_SseDoneFraming:
     def test_done_branch_yields_blank_separator_in_source(self):
-        """The [DONE] branch must yield a blank chunk after the flush
-        event so the chunk + b'\\n' framing produces \\n\\n."""
+        """The [DONE] branch must deliver the flush via the shared
+        ``_build_flush_chunks`` helper, which yields a blank chunk after the
+        synthesized data event so the chunk + b'\\n' framing produces \\n\\n."""
         path = Path(__file__).parent.parent / "src" / "scruxy" / "scrubber" / "sse_stream_unscrubber.py"
         src = path.read_text(encoding="utf-8")
-        # Find the [DONE] branch and verify it yields b"" right after
-        # yielding the rebuilt synthesized data event.
+        # Find the [DONE] branch and verify it delegates the flush (which
+        # emits the blank separator) to the shared helper.
         done_block_start = src.find("if event_data.strip() == \"[DONE]\":")
         assert done_block_start != -1
         done_block = src[done_block_start:done_block_start + 1500]
-        assert "yield f\"data: {rebuilt}\".encode(\"utf-8\")" in done_block
-        # The blank-chunk separator MUST appear inside the flush block,
-        # before the [DONE] line is yielded.
-        flush_yield = done_block.find("yield f\"data: {rebuilt}\".encode(\"utf-8\")")
-        rest_after = done_block[flush_yield:]
-        # Next non-blank meaningful line within ~10 lines should be `yield b""`
-        assert "yield b\"\"" in rest_after.split("yield line.encode")[0]
+        assert "_build_flush_chunks(" in done_block
+        # The helper appends the rebuilt data event followed by the blank
+        # separator chunk so callers' "chunk + b'\\n'" framing yields \\n\\n.
+        helper_start = src.find("def _build_flush_chunks(")
+        assert helper_start != -1
+        helper = src[helper_start:helper_start + 1500]
+        assert "f\"data: {rebuilt}\".encode(\"utf-8\")" in helper
+        assert "chunks.append(b\"\")" in helper
 
     def test_post_loop_flush_yields_blank_separator(self):
         path = Path(__file__).parent.parent / "src" / "scruxy" / "scrubber" / "sse_stream_unscrubber.py"
         src = path.read_text(encoding="utf-8")
-        # The post-loop end-of-stream flush has the same defect; verify
-        # it also yields b"" after the synthesized data event.
+        # The post-loop end-of-stream flush must also delegate to the shared
+        # helper so it yields b"" after the synthesized data event.
         idx = src.find("# Flush remaining buffer content at end of stream")
         assert idx != -1
-        block = src[idx:idx + 1500]
-        assert "yield f\"data: {rebuilt}\".encode(\"utf-8\")" in block
-        assert "yield b\"\"" in block
+        block = src[idx:idx + 800]
+        assert "_build_flush_chunks(" in block
+        helper_start = src.find("def _build_flush_chunks(")
+        assert helper_start != -1
+        helper = src[helper_start:helper_start + 1500]
+        assert "f\"data: {rebuilt}\".encode(\"utf-8\")" in helper
+        assert "chunks.append(b\"\")" in helper
 
     @pytest.mark.asyncio
     async def test_done_actually_emits_blank_chunk(self):

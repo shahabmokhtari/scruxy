@@ -411,6 +411,35 @@ def _is_forbidden_proxy_ip(ip: Any) -> bool:
     return False
 
 
+def _is_loopback_hostname(hostname: str | None) -> bool:
+    """Return whether *hostname* is an explicit loopback literal.
+
+    Matches ``localhost`` and any literal loopback IP (127.0.0.0/8 and
+    ``::1``).  This lets the forward proxy reach legitimate local
+    services the client *explicitly* targets -- e.g. MCP servers the
+    harness runs on ``127.0.0.1:PORT`` -- while the SSRF guard still
+    blocks public hostnames that merely *resolve* to private/internal
+    IPs (DNS-rebinding / cloud-metadata).  Only literals are trusted;
+    no DNS resolution is performed here.
+    """
+    if not hostname:
+        return False
+    # Normalize: a trailing dot (FQDN form, e.g. ``localhost.``) is never
+    # meaningful for a loopback literal but would otherwise fail both the
+    # ``localhost`` equality check and ``ip_address()`` parsing, causing a
+    # legitimate local target to be 403'd by the SSRF guard.
+    host = hostname.strip().rstrip(".").lower()
+    if host == "localhost":
+        return True
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    import ipaddress
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _build_host_header(parsed: Any) -> str:
     """Build the Host header for a parsed URL, preserving non-default ports."""
     hostname = parsed.hostname or ""
@@ -499,8 +528,16 @@ def _split_head_from_buffer(buf: bytes) -> tuple[str, bytes] | None:
     return None
 
 
-async def _resolve_public_endpoints(hostname: str, port: int) -> list[tuple[str, int]]:
-    """Resolve *hostname* and return all safe public endpoints in resolver order."""
+async def _resolve_public_endpoints(
+    hostname: str, port: int, *, allow_loopback: bool = False
+) -> list[tuple[str, int]]:
+    """Resolve *hostname* and return all safe public endpoints in resolver order.
+
+    When *allow_loopback* is True, resolved loopback addresses are
+    permitted -- used when the client explicitly targets a local
+    service (e.g. a harness MCP server on ``127.0.0.1``).  All other
+    private/reserved IPs are still rejected to preserve SSRF protection.
+    """
     import ipaddress as _ipa
     import socket
 
@@ -514,7 +551,7 @@ async def _resolve_public_endpoints(hostname: str, port: int) -> list[tuple[str,
     seen: set[tuple[str, int]] = set()
     for _, _, _, _, addr in addrs:
         ip = _ipa.ip_address(addr[0])
-        if _is_forbidden_proxy_ip(ip):
+        if _is_forbidden_proxy_ip(ip) and not (allow_loopback and ip.is_loopback):
             raise PermissionError(f"private/reserved IP {ip}")
         candidate = (addr[0], addr[1])
         if candidate not in seen:
@@ -1292,7 +1329,29 @@ class ForwardProxyServer:
 
         # Send 200 only after we know we can reach the upstream for passthrough,
         # or immediately for MITM (which handles its own connection).
-        if _host_matches_provider(hostname, self._registry):
+        # Loopback CONNECT targets (e.g. a local HTTPS MCP server the
+        # harness runs on 127.0.0.1) are tunnelled transparently with the
+        # SSRF guard relaxed for loopback only.  All providers are remote,
+        # so a loopback host never needs MITM scrubbing -- and when
+        # HTTP_PROXY points here the harness routes loopback traffic
+        # through us, which the guard would otherwise 403.
+        #
+        # EXCEPTION: a CONNECT to the app's own main listen port is NOT
+        # allowed through, because CONNECT exposes no path at decision
+        # time, so the per-path admin/UI block (which the plain-HTTP path
+        # applies on the main port) cannot run -- tunnelling it would let a
+        # client reach the admin/UI surface.  Such targets fall through to
+        # the passthrough branch below, where the SSRF guard rejects the
+        # loopback IP with 403 (restoring the pre-change behavior).  Local
+        # MCP servers live on OTHER ports, so this does not affect them.
+        if _is_loopback_hostname(hostname) and port != self._main_listen_port:
+            logger.info(
+                "Forward proxy CONNECT: transparent tunnel to loopback %s:%d", hostname, port
+            )
+            await self._passthrough_tunnel(
+                hostname, port, client_reader, client_writer, allow_loopback=True
+            )
+        elif _host_matches_provider(hostname, self._registry):
             # MITM path: send 200 immediately, then start TLS handshake
             client_writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
             await client_writer.drain()
@@ -1309,10 +1368,14 @@ class ForwardProxyServer:
         port: int,
         client_reader: asyncio.StreamReader,
         client_writer: asyncio.StreamWriter,
+        *,
+        allow_loopback: bool = False,
     ) -> None:
         """Relay bytes bidirectionally without inspection."""
         try:
-            connect_targets = await _resolve_public_endpoints(hostname, port)
+            connect_targets = await _resolve_public_endpoints(
+                hostname, port, allow_loopback=allow_loopback
+            )
         except PermissionError as exc:
             logger.warning(
                 "Forward proxy passthrough: blocked connection to %s:%d (%s)",
@@ -1320,11 +1383,19 @@ class ForwardProxyServer:
                 port,
                 exc,
             )
+            self._log_passthrough(
+                method="CONNECT", path=f"{hostname}:{port}",
+                url=f"https://{hostname}:{port}", status=403, tunnel=True,
+            )
             client_writer.write(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
             await client_writer.drain()
             return
         except OSError:
             logger.warning("Forward proxy passthrough: DNS resolution failed for %s:%d", hostname, port)
+            self._log_passthrough(
+                method="CONNECT", path=f"{hostname}:{port}",
+                url=f"https://{hostname}:{port}", status=502, tunnel=True,
+            )
             client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
             await client_writer.drain()
             return
@@ -2119,22 +2190,31 @@ class ForwardProxyServer:
             body=body_json,
         )
 
-        # If the target is the local reverse proxy, skip provider matching
-        # and forward as-is.  The reverse proxy will handle scrubbing.
-        _local_hosts = {"localhost", "127.0.0.1", "::1", "[::1]"}
-        if (
-            parsed.hostname
-            and parsed.hostname.lower() in _local_hosts
-            and (parsed.port or 80) == self._main_listen_port
-        ):
-            if _is_blocked_local_admin_path(parsed.path or "/"):
+        # Loopback targets are passed through without scrubbing -- this
+        # covers BOTH the local reverse proxy (which does its own
+        # scrubbing) AND other local services the harness runs, e.g. MCP
+        # servers on ``127.0.0.1:PORT``.  When HTTP_PROXY points at this
+        # forward proxy, the harness routes ALL traffic through it,
+        # including loopback; the SSRF guard would otherwise reject those
+        # legitimate local calls with "403 non-public IP".  The app's
+        # admin/UI surface lives only on the main reverse-proxy port, so
+        # the admin-path block is scoped to that port (other loopback
+        # ports may legitimately serve any path).
+        if parsed.hostname and _is_loopback_hostname(parsed.hostname):
+            _target_port = parsed.port or (
+                443 if parsed.scheme.lower() == "https" else 80
+            )
+            if (
+                _target_port == self._main_listen_port
+                and _is_blocked_local_admin_path(parsed.path or "/")
+            ):
                 logger.warning(
                     "Forward proxy: blocked local admin/UI path via passthrough: %s",
                     _redact_url_for_log(url),
                 )
                 return 403, {"Content-Type": "text/plain"}, b"Forbidden: local admin path"
             logger.debug(
-                "Forward proxy: target is local reverse proxy (%s) -- passthrough",
+                "Forward proxy: loopback target (%s) -- passthrough",
                 _redact_url_for_log(url),
             )
             return await self._plain_forward(
@@ -2802,12 +2882,25 @@ class ForwardProxyServer:
     ) -> tuple[int, dict[str, str], bytes]:
         """Forward a request without scrubbing (no provider match)."""
         parsed = urlparse(url)
-        if allow_private_target and _is_blocked_local_admin_path(parsed.path or "/"):
-            logger.warning("Forward proxy plain: blocked local admin path %s", _redact_url_for_log(url))
-            return 403, {"Content-Type": "text/plain"}, b"Forbidden: local admin path"
-
         hostname = parsed.hostname or ""
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        # The app's admin/UI surface lives only on the main reverse-proxy
+        # port (loopback).  Guard it there.  Other loopback ports reached
+        # via ``allow_private_target`` -- e.g. local MCP servers -- may
+        # legitimately serve any path, including "/" and "/openapi.json",
+        # so the admin block must NOT apply to them.
+        if (
+            allow_private_target
+            and port == self._main_listen_port
+            and _is_loopback_hostname(hostname)
+            and _is_blocked_local_admin_path(parsed.path or "/")
+        ):
+            logger.warning("Forward proxy plain: blocked local admin path %s", _redact_url_for_log(url))
+            self._log_passthrough(
+                method=method, path=parsed.path or "/", url=url, status=403,
+            )
+            return 403, {"Content-Type": "text/plain"}, b"Forbidden: local admin path"
+
         resolved_targets: list[tuple[str, int]] = []
         # Note: HTTPS absolute-form passthrough is intentionally allowed.
         # ``httpx`` performs the TLS handshake to the upstream itself
@@ -2825,9 +2918,15 @@ class ForwardProxyServer:
                 resolved_targets = await _resolve_public_endpoints(hostname, port)
             except PermissionError as exc:
                 logger.warning("Forward proxy plain: blocked SSRF to %s (%s)", hostname, exc)
+                self._log_passthrough(
+                    method=method, path=parsed.path or "/", url=url, status=403,
+                )
                 return 403, {"Content-Type": "text/plain"}, b"Forbidden: non-public IP"
             except OSError:
                 logger.warning("Forward proxy plain: DNS resolution failed for %s", _redact_url_for_log(url))
+                self._log_passthrough(
+                    method=method, path=parsed.path or "/", url=url, status=502,
+                )
                 return 502, {"Content-Type": "text/plain"}, b"Bad Gateway: hostname resolution failed"
 
         candidate_urls = [url]

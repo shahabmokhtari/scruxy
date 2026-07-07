@@ -18,6 +18,7 @@ from scruxy.proxy.forward_proxy import (
     ForwardProxyServer,
     _build_host_header,
     _host_matches_provider,
+    _is_loopback_hostname,
     _parse_headers,
     _parse_request_line,
     _strip_hop_by_hop,
@@ -336,6 +337,38 @@ class TestForwardProxyServer:
         assert b"non-public IP" in body
         server._client.request.assert_not_called()
 
+    async def test_plain_forward_blocked_request_logged_to_passthrough(
+        self, mock_deps: dict
+    ) -> None:
+        """An SSRF-denied request must be recorded in the passthrough log so
+        it is visible on the Passthrough page (not just emitted to logs)."""
+        mock_deps["registry"].providers = []
+        mock_deps["registry"].match = MagicMock(return_value=None)
+        pt_log: list[dict] = []
+        server = ForwardProxyServer(
+            **mock_deps,
+            passthrough_log=pt_log,
+            passthrough_enabled_ref=lambda: True,
+        )
+        server._client.request = AsyncMock()
+
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("100.64.0.1", 80))],
+        ):
+            status, headers, body = await server._plain_forward(
+                method="GET",
+                url="http://example.com/api",
+                headers={},
+                body=None,
+            )
+
+        assert status == 403
+        assert len(pt_log) == 1
+        assert pt_log[0]["status"] == 403
+        assert pt_log[0]["method"] == "GET"
+        server._client.request.assert_not_called()
+
     async def test_plain_forward_preserves_url_embedded_credentials(self, mock_deps: dict) -> None:
         mock_deps["registry"].providers = []
         mock_deps["registry"].match = MagicMock(return_value=None)
@@ -625,6 +658,228 @@ class TestForwardProxyServer:
         if status == 403:
             assert b"local admin path" in body
         server._client.request.assert_not_called()
+
+    async def test_scrub_and_forward_passes_through_loopback_mcp_server(
+        self, mock_deps: dict
+    ) -> None:
+        """Loopback targets on non-main ports (local MCP servers) must pass
+        through, NOT be rejected by the SSRF guard as "non-public IP"."""
+        mock_deps["registry"].providers = []
+        mock_deps["registry"].match = MagicMock(return_value=None)
+        server = ForwardProxyServer(**mock_deps, main_listen_port=8080)
+        server._client.request = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=b'{"jsonrpc":"2.0"}',
+            )
+        )
+
+        status, headers, body = await server._scrub_and_forward(
+            method="POST",
+            url="http://127.0.0.1:58939/mcp",
+            headers={"content-type": "application/json"},
+            body=b'{"jsonrpc":"2.0","method":"initialize"}',
+        )
+
+        assert status == 200
+        request_call = server._client.request.await_args.kwargs
+        assert request_call["url"] == "http://127.0.0.1:58939/mcp"
+
+    async def test_scrub_and_forward_loopback_admin_block_scoped_to_main_port(
+        self, mock_deps: dict
+    ) -> None:
+        """An admin-looking path on a NON-main loopback port (a local MCP
+        server) must pass through -- the admin block only guards the app's
+        own reverse-proxy port."""
+        mock_deps["registry"].providers = []
+        mock_deps["registry"].match = MagicMock(return_value=None)
+        server = ForwardProxyServer(**mock_deps, main_listen_port=8080)
+        server._client.request = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=b"ok",
+            )
+        )
+
+        status, headers, body = await server._scrub_and_forward(
+            method="GET",
+            url="http://127.0.0.1:58939/ui/api/settings",
+            headers={},
+            body=None,
+        )
+
+        assert status == 200
+        server._client.request.assert_awaited_once()
+
+    async def test_resolve_public_endpoints_allow_loopback(self) -> None:
+        """``allow_loopback`` permits loopback IPs while still blocking other
+        private/reserved ranges."""
+        from scruxy.proxy.forward_proxy import _resolve_public_endpoints
+
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("127.0.0.1", 8765))],
+        ):
+            # Default: loopback is forbidden.
+            with pytest.raises(PermissionError):
+                await _resolve_public_endpoints("localhost", 8765)
+            # allow_loopback=True: loopback permitted.
+            targets = await _resolve_public_endpoints(
+                "localhost", 8765, allow_loopback=True
+            )
+            assert targets == [("127.0.0.1", 8765)]
+
+        # allow_loopback must NOT relax non-loopback private/link-local IPs.
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("169.254.169.254", 80))],
+        ):
+            with pytest.raises(PermissionError):
+                await _resolve_public_endpoints(
+                    "metadata.example", 80, allow_loopback=True
+                )
+
+    async def test_passthrough_tunnel_allows_loopback_target(
+        self, mock_deps: dict
+    ) -> None:
+        """CONNECT passthrough to a loopback HTTPS service connects when
+        ``allow_loopback`` is set (e.g. a local HTTPS MCP server)."""
+        mock_deps["registry"].providers = []
+        mock_deps["registry"].match = MagicMock(return_value=None)
+        server = ForwardProxyServer(**mock_deps)
+
+        class Writer:
+            def __init__(self) -> None:
+                self.writes: list[bytes] = []
+
+            def write(self, data: bytes) -> None:
+                self.writes.append(data)
+
+            async def drain(self) -> None:
+                return None
+
+        client_reader = asyncio.StreamReader()
+        client_reader.feed_eof()
+        client_writer = Writer()
+        upstream_reader = asyncio.StreamReader()
+        upstream_reader.feed_eof()
+        upstream_writer = MagicMock()
+        upstream_writer.write = MagicMock()
+        upstream_writer.drain = AsyncMock()
+        upstream_writer.close = MagicMock()
+        upstream_writer.wait_closed = AsyncMock()
+
+        connect_calls: list[tuple[str, int]] = []
+
+        async def open_connection_side_effect(host: str, port: int):
+            connect_calls.append((host, port))
+            return upstream_reader, upstream_writer
+
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("127.0.0.1", 9001))],
+        ), patch(
+            "scruxy.proxy.forward_proxy.asyncio.open_connection",
+            side_effect=open_connection_side_effect,
+        ):
+            await server._passthrough_tunnel(
+                "127.0.0.1",
+                9001,
+                client_reader,
+                client_writer,
+                allow_loopback=True,
+            )
+
+        assert connect_calls == [("127.0.0.1", 9001)]
+        assert any(
+            b"200 Connection established" in chunk for chunk in client_writer.writes
+        )
+
+    async def test_handle_connect_loopback_nonmain_port_tunnels(self, mock_deps: dict) -> None:
+        """CONNECT to a loopback target on a NON-main port (e.g. a local
+        HTTPS MCP server) must establish a tunnel, not 403."""
+        mock_deps["registry"].providers = []
+        mock_deps["registry"].match = MagicMock(return_value=None)
+        server = ForwardProxyServer(**mock_deps, main_listen_port=8080)
+
+        class Writer:
+            def __init__(self) -> None:
+                self.writes: list[bytes] = []
+
+            def write(self, data: bytes) -> None:
+                self.writes.append(data)
+
+            async def drain(self) -> None:
+                return None
+
+        client_reader = asyncio.StreamReader()
+        client_reader.feed_eof()
+        client_writer = Writer()
+        upstream_reader = asyncio.StreamReader()
+        upstream_reader.feed_eof()
+        upstream_writer = MagicMock()
+        upstream_writer.write = MagicMock()
+        upstream_writer.drain = AsyncMock()
+        upstream_writer.close = MagicMock()
+        upstream_writer.wait_closed = AsyncMock()
+
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("127.0.0.1", 9001))],
+        ), patch(
+            "scruxy.proxy.forward_proxy.asyncio.open_connection",
+            new=AsyncMock(return_value=(upstream_reader, upstream_writer)),
+        ):
+            await server._handle_connect("127.0.0.1:9001", {}, client_reader, client_writer)
+
+        assert any(b"200 Connection established" in w for w in client_writer.writes)
+        assert not any(b"403" in w for w in client_writer.writes)
+
+    async def test_handle_connect_loopback_main_port_blocked(self, mock_deps: dict) -> None:
+        """CONNECT to loopback on the MAIN listen port must be rejected: it
+        would bypass the per-path admin/UI block (CONNECT exposes no path)."""
+        mock_deps["registry"].providers = []
+        mock_deps["registry"].match = MagicMock(return_value=None)
+        server = ForwardProxyServer(**mock_deps, main_listen_port=8080)
+
+        class Writer:
+            def __init__(self) -> None:
+                self.writes: list[bytes] = []
+
+            def write(self, data: bytes) -> None:
+                self.writes.append(data)
+
+            async def drain(self) -> None:
+                return None
+
+        client_reader = asyncio.StreamReader()
+        client_reader.feed_eof()
+        client_writer = Writer()
+        open_conn = AsyncMock()
+
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("127.0.0.1", 8080))],
+        ), patch(
+            "scruxy.proxy.forward_proxy.asyncio.open_connection", new=open_conn
+        ):
+            await server._handle_connect("127.0.0.1:8080", {}, client_reader, client_writer)
+
+        assert any(b"403 Forbidden" in w for w in client_writer.writes)
+        assert not any(b"200 Connection established" in w for w in client_writer.writes)
+        open_conn.assert_not_called()
+
+    def test_is_loopback_hostname_variants(self) -> None:
+        """`_is_loopback_hostname` accepts loopback literals (incl. FQDN
+        trailing dot) and rejects everything else (no DNS resolution)."""
+        for h in ["localhost", "localhost.", "LOCALHOST", "127.0.0.1", "127.0.0.1.",
+                  "127.0.0.2", "::1", "[::1]", "[::ffff:127.0.0.1]"]:
+            assert _is_loopback_hostname(h) is True, h
+        for h in ["example.com", "localhost.example.com", "10.0.0.1",
+                  "192.168.1.1", "169.254.169.254", "0.0.0.0", "", None]:
+            assert _is_loopback_hostname(h) is False, h
 
     async def test_passthrough_tunnel_tries_second_address(self, mock_deps: dict) -> None:
         """CONNECT passthrough should fall back to a later validated address."""
