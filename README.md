@@ -1,503 +1,329 @@
+<div align="center">
+
 # Scruxy
 
-**PII scrubbing proxy for LLM coding assistants**
+### Keep sensitive details local. Keep your assistant useful.
 
-## What It Does
+A local PII-scrubbing proxy for Claude Code, GitHub Copilot, and compatible LLM clients.
 
-Scruxy is a local Python proxy that sits between your AI coding assistant (Claude Code, GitHub Copilot) and the upstream LLM API. It intercepts outgoing requests, detects and replaces PII with deterministic tokens before anything leaves your machine, then transparently restores original values in the responses you receive. Your assistant works exactly as before -- but your personal and sensitive data never reaches the cloud.
+**Local detection** &nbsp; / &nbsp; **Reversible tokens** &nbsp; / &nbsp; **Streaming responses** &nbsp; / &nbsp; **Built-in dashboard**
 
-## Quick Start
+[Quick start](#quick-start) · [Feature tour](#feature-tour) · [Connect your assistant](#connect-your-assistant) · [Configuration guide](docs/configuration.md) · [Privacy boundaries](#privacy-boundaries)
 
-Install directly from GitHub:
+</div>
 
-```bash
-pip install git+https://github.com/shahabmokhtari/scruxy
+![Scruxy dashboard showing five providers, request totals, and pipeline latency charts](docs/images/dashboard.png)
+
+*Real UI, synthetic demo data. Screenshot timings illustrate the interface, not performance benchmarks. [Capture details](docs/screenshots.md).*
+
+## What Scruxy does
+
+Scruxy sits between your coding assistant and its LLM API. It detects PII in supported request text fields, replaces detected values with tokens, and restores those values when the API returns the tokens. Detection runs locally using Microsoft Presidio, spaCy, regex rules, and optional custom detectors.
+
+```text
+Your assistant                 Scruxy on your machine                  LLM API
+     |                                  |                                 |
+     |  "Email alex@example.com"         |                                 |
+     | -------------------------------->|  "Email REDACTED_EMAIL_ADDRESS_1"
+     |                                  | ------------------------------->|
+     |                                  |  "Sent to REDACTED_EMAIL_ADDRESS_1"
+     |  "Sent to alex@example.com"       |<--------------------------------|
+     |<---------------------------------|                                 |
 ```
 
-Or run without installing using `uvx`:
+| Capability | What you get |
+|---|---|
+| **Multiple API formats** | Anthropic Messages, OpenAI Chat Completions and Responses, plus Copilot-specific provider definitions |
+| **Two routing options** | Base-URL reverse proxy or standard HTTP/HTTPS forward proxy with CONNECT interception |
+| **Layered detection** | Known-PII reuse, whitelisting, NER, regex, file-path detection, and Python plugins |
+| **Reversible replacements** | Shared PII-to-token mappings, optional UUID or script-generated replacements, and session-aware restoration |
+| **Streaming support** | SSE token restoration, including tokens split across chunks and structured event payloads |
+| **An inspectable pipeline** | Local tester, recordings, stage timings, token browser, logs, and dark/light themes |
 
-```bash
-uvx --from git+https://github.com/shahabmokhtari/scruxy scruxy
-```
+> [!IMPORTANT]
+> Scruxy reduces exposure; it is not a guarantee that every secret or identifier is detected. Unmatched traffic can pass through without scrubbing, and local data can contain original PII. Read [Privacy boundaries](#privacy-boundaries) before using it with sensitive material.
 
-Then start the proxy:
+## Quick start
 
-```bash
-scruxy
-```
+**Requirements:** Python 3.11+, Git, and your assistant's normal upstream authentication. The default detector uses the `en_core_web_lg` spaCy model. No API key is needed for the local Tester.
 
-Scruxy is a transparent proxy — it forwards the `Authorization` header from your AI assistant (Claude Code, Copilot, etc.) to the upstream API unchanged. No API keys need to be configured on Scruxy itself; just make sure your assistant is already authenticated with its upstream provider.
+Use a **source checkout with an editable install**. The current provider loaders read YAML assets from the checkout's `default_config` directory, so keep the checkout in place.
 
-## Capture Modes
-
-Scruxy provides three ways to intercept LLM API traffic. You can use them independently or combine them.
-
-### Mode 1 — Reverse Proxy (Base URL Override)
-
-The simplest mode. Scruxy acts as a reverse proxy on `http://localhost:8080`. You tell your coding assistant to send requests to Scruxy instead of the real API, and Scruxy forwards them upstream after scrubbing.
-
-**Default port:** `8080`
-
-```bash
-# Claude Code
-export ANTHROPIC_BASE_URL=http://localhost:8080
-
-# GitHub Copilot
-export OPENAI_BASE_URL=http://localhost:8080
-```
-
-An HTTPS variant is also available on port `8443` for tools that require TLS. It is **disabled by default**; enable it by setting `interception.https.enabled: true` in `~/.scruxy/config.yaml`:
-
-```bash
-export ANTHROPIC_BASE_URL=https://localhost:8443
-export OPENAI_BASE_URL=https://localhost:8443
-```
-
-The HTTPS listener uses a self-signed certificate generated by Scruxy's built-in CA. You will need to trust the CA cert (see [CA Certificate Trust](#ca-certificate-trust) below) or disable certificate verification in your tool.
-
-### Mode 2 — Forward Proxy (HTTP_PROXY / HTTPS_PROXY)
-
-For tools that don't support custom base URLs but honour standard proxy environment variables. Scruxy runs an HTTP forward proxy with TLS interception (CONNECT tunneling) — all HTTPS traffic to LLM APIs flows through Scruxy transparently. **Enabled by default**; disable with `--no-forward-proxy`.
-
-**Default port:** `8081`
-
-```bash
-export HTTP_PROXY=http://localhost:8081
-export HTTPS_PROXY=http://localhost:8081
-```
-
-This mode requires trusting Scruxy's CA certificate (see [CA Certificate Trust](#ca-certificate-trust)).
-
-> **Local services pass through untouched.** When `HTTP_PROXY`/`HTTPS_PROXY` point at Scruxy, the harness routes *all* traffic through it — including requests to local services on loopback addresses (`localhost` / `127.0.0.1` / `::1`), such as locally-hosted MCP servers. Scruxy forwards loopback traffic through transparently without scrubbing (it never leaves the machine), so local MCP servers keep working. Only the app's own admin/UI surface on the main port stays blocked.
-
-### Choosing a Mode
-
-| Mode | Best for | Requires CA trust? | Enabled by default? |
-|------|----------|--------------------|---------------------|
-| Reverse proxy (HTTP) | Claude Code, tools with base URL config | No | Yes |
-| Reverse proxy (HTTPS) | Tools that require TLS base URLs | Yes | No (set `interception.https.enabled: true`) |
-| Forward proxy | GitHub Copilot, tools that honour `HTTP_PROXY` | Yes | Yes (disable with `--no-forward-proxy`) |
-
-## Ports & Listeners
-
-| Listener | Default Port | Protocol | Enabled by default? | Purpose |
-|----------|-------------|----------|---------------------|---------|
-| Reverse proxy + Web UI | `8080` | HTTP | Yes | Main proxy endpoint (base URL override) and dashboard at `/ui` |
-| HTTPS reverse proxy | `8443` | HTTPS | No | TLS variant of the reverse proxy |
-| Forward proxy | `8081` | HTTP (CONNECT) | Yes | Standard HTTP forward proxy with TLS interception |
-
-All listeners bind to `localhost` by default (IPv4 + IPv6 loopback). The reverse proxy and Web UI share port `8080` — UI routes are mounted under `/ui` and `/static`, everything else is proxied.
-
-### Overriding Ports via CLI
-
-```bash
-scruxy --port 9090              # Reverse proxy on port 9090
-scruxy --https-port 9443        # HTTPS reverse proxy on port 9443
-scruxy --forward-proxy-port 9081 # Forward proxy on port 9081
-scruxy --host 0.0.0.0           # Bind to all interfaces
-scruxy --no-https               # Disable HTTPS listener
-scruxy --no-forward-proxy       # Disable forward proxy
-```
-
-### Overriding Ports via Config
-
-All ports can also be set in `~/.scruxy/config.yaml`:
-
-```yaml
-interception:
-  listen_host: "localhost"
-  listen_port: 8080
-
-  https:
-    enabled: true
-    listen_port: 8443
-    ca_cert_dir: "~/.scruxy/certs"
-
-  forward_proxy:
-    enabled: true
-    listen_port: 8081
-    ca_cert_dir: "~/.scruxy/certs"
-```
-
-CLI flags always take precedence over config file values.
-
-### Complete CLI Reference
-
-```
-scruxy [OPTIONS]
-
-Options:
-  --config PATH              Path to config YAML (default: ~/.scruxy/config.yaml)
-  --host HOST                Listen host (default: localhost)
-  --port PORT                Reverse proxy port (default: 8080)
-  --https-port PORT          HTTPS reverse proxy port (default: 8443)
-  --no-https                 Disable HTTPS reverse proxy
-  --forward-proxy-port PORT  Forward proxy port (default: 8081)
-  --no-forward-proxy         Disable forward proxy
-  --no-browser               Don't open the dashboard in a browser on startup
-  --mode {primary,mitmproxy} Interception mode (mitmproxy is legacy and
-                             auto-migrated to primary with a warning)
-```
-
-## CA Certificate Trust
-
-The forward proxy and HTTPS reverse proxy use Scruxy's built-in CA to generate certificates on the fly. On first run, the CA key and cert are created at `~/.scruxy/certs/scruxy-ca.pem`.
-
-To trust the CA system-wide:
-
-- **Windows:** `certutil -addstore Root %USERPROFILE%\.scruxy\certs\scruxy-ca.pem`
-- **macOS:** `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/.scruxy/certs/scruxy-ca.pem`
-- **Linux:** Copy to `/usr/local/share/ca-certificates/` and run `sudo update-ca-certificates`
-
-For Node.js tools (like GitHub Copilot), you can also set:
-
-```bash
-export NODE_EXTRA_CA_CERTS=~/.scruxy/certs/scruxy-ca.pem
-```
-
-## How It Works
-
-```
-                          Request Flow
-                          ============
-
-Coding Assistant (Claude Code / Copilot)
-        |
-        v
-  Provider Router         Identifies the LLM API format (Anthropic, OpenAI, etc.)
-        |
-        v
-  Scrubbing Pipeline      Presidio NER + regex patterns + custom plugins
-        |
-        v
-  Token Map               Replaces PII with deterministic tokens (REDACTED_{TYPE}_{N})
-        |
-        v
-  Upstream Forwarder      Sends scrubbed request to the real API
-        |
-        v
-  Real LLM API
-
-
-                          Response Flow
-                          =============
-
-  Real LLM API
-        |
-        v
-  Upstream Forwarder
-        |
-        v
-  Unscrubber               Restores original PII from token map
-        |
-        v
-  Coding Assistant          Sees original values transparently
-```
-
-**Key concepts:**
-
-- **Providers** parse requests and responses for each LLM API format. Built-in support for Anthropic, OpenAI, and GitHub Copilot (chat + responses). Add custom providers via YAML declarations or Python classes.
-- **Pipeline** runs detection stages (Presidio, regex, plugins) to find PII spans. Stages are stateless; all session state lives in the token map.
-- **Token Map** maintains a bidirectional PII-to-token mapping per session. The same PII always maps to the same token within a session (`REDACTED_EMAIL_1`, `REDACTED_PERSON_3`, etc.). Maps are persisted to disk and flushed periodically.
-- **SSE streaming** is fully supported. A trie-based rolling buffer handles tokens that split across chunk boundaries.
-
-## User Data Directory
-
-All runtime data lives under `~/.scruxy/`. The directory is created automatically on first run.
-
-```
-~/.scruxy/
-├── config.yaml                     # Main configuration (YAML)
-├── scruxy.db                       # SQLite token database (PII ↔ token mappings)
-├── tester_state.json               # Tester page state (persisted across reloads)
-├── stats.json                      # Proxy statistics
-├── passthrough_log.jsonl           # Passthrough request log (when enabled)
-├── regex_patterns.yaml             # Custom regex PII patterns
-├── whitelist.yaml                  # Terms to exclude from scrubbing
-├── sessions/
-│   ├── {session-id}/
-│   │   ├── session_pii.json        # PII strings used by this session
-│   │   └── recording.jsonl         # Request/response recordings
-│   └── test/
-│       └── session_pii.json        # Tester session's PII set
-├── plugins/                        # Custom detector plugins (*.py)
-│   └── data/                       # Per-plugin key-value storage
-│       └── {plugin_name}.json
-├── providers/                      # Custom YAML or Python providers
-├── logs/                           # Log files (rotated, configurable retention)
-└── certs/                          # CA certificates for TLS interception
-```
-
-**`scruxy.db`** is the SQLite database storing all PII-to-token mappings. It is shared across all sessions — the same PII always maps to the same token regardless of which session detected it. The database is flushed periodically (default every 5 seconds) and on shutdown. Set `tokens.persistent: false` in config for in-memory-only mode (no SQLite).
-
-**`session_pii.json`** tracks which PII entries each session has used. This enables per-session cleanup: clearing a session only removes entries that no other session shares.
-
-## Configuration
-
-Scruxy uses a YAML config file at `~/.scruxy/config.yaml`. A default configuration is created on first run. Key settings include:
-
-```yaml
-interception:
-  listen_host: "localhost"
-  listen_port: 8080
-
-providers:
-  anthropic:
-    enabled: true
-    upstream_url: "https://api.anthropic.com"
-  openai:
-    enabled: true
-    upstream_url: "https://api.openai.com"
-
-tokens:
-  prefix: "REDACTED"
-  format: "{prefix}_{category}_{n}"
-  expiration_hours: 168            # Token TTL in hours (0 = never expire)
-  persistent: true                 # false = in-memory only, no SQLite DB
-  replacements:                    # Per-entity-type replacement strategies
-    PERSON:
-      strategy: "default"          # "default", "uuid", or "script"
-
-pipeline:
-  stages:
-    - name: presidio
-      enabled: true
-    - name: regex
-      enabled: true
-    - name: plugins
-      enabled: true
-
-sessions:
-  storage_dir: "~/.scruxy/sessions"
-  max_session_age_hours: 168
-  flush_interval_seconds: 5
-```
-
-**Custom regex patterns** can be added to `~/.scruxy/regex_patterns.yaml`.
-
-**Custom providers** (YAML-only or Python class) go in `~/.scruxy/providers/`.
-
-**Custom plugins** go in `~/.scruxy/plugins/` (see below).
-
-## Plugin System
-
-Write custom PII detectors by subclassing `DetectorPlugin` and dropping the file into `~/.scruxy/plugins/`. Each plugin must define `name`, `version`, `setup()`, and `detect()`:
-
-```python
-import re
-from scruxy.plugin.base import DetectorPlugin, PiiEntity
-
-class BadgeNumberDetector(DetectorPlugin):
-    name = "badge_number_detector"
-    version = "1.0"
-
-    def setup(self, config: dict) -> None:
-        self._pattern = re.compile(config.get("pattern", r"BADGE-\d{4}"))
-
-    def detect(self, text: str, language: str) -> list[PiiEntity]:
-        return [
-            PiiEntity(
-                entity_type="BADGE_NUMBER",
-                start=m.start(),
-                end=m.end(),
-                score=1.0,
-                source=self.name,
-            )
-            for m in self._pattern.finditer(text)
-        ]
-```
-
-A per-plugin timeout of 50ms protects the overall latency budget. If `detect()` exceeds the deadline, the plugin's results are skipped for that invocation.
-
-## Web UI
-
-Scruxy includes a built-in web dashboard at `http://localhost:8080/ui/` (opens automatically on startup). It provides:
-
-| Page | Purpose |
-|------|---------|
-| **Dashboard** | Live stats: total requests, entities scrubbed, latency, entity breakdown by type |
-| **Tester** | Test the scrubbing pipeline interactively — paste text, see detected PII and tokens |
-| **Plugins** | View and configure detection plugins (Presidio, regex, file path, whitelist, custom) |
-| **Providers** | View configured LLM providers with URL patterns and status |
-| **Tokens** | Browse the live token map — see all PII ↔ token mappings |
-| **Recordings** | Request/response pairs: raw, chat, scrub-diff views; per-request latency breakdown (scrub → network → unscrub); per-stage pipeline timing; collapsible headers; scrubbed/unscrubbed toggle; FWD/REV proxy badge |
-| **Passthrough** | All proxied requests with method filters (CONNECT hidden by default), expandable bodies |
-| **Logs** | Application log viewer (ring buffer) with level filter chips (WARNING+ by default); PII detection events |
-| **Settings** | Edit all config sections, whitelist, and regex patterns — saved to `config.yaml` |
-
-The Recordings and Passthrough pages support auto-refresh with incremental DOM updates — expanded rows stay open when new data arrives.
-
-## Built-in Providers
-
-| Provider | API | URL Pattern | Format |
-|----------|-----|-------------|--------|
-| `anthropic` | Anthropic Claude | `*/v1/messages` | Python class (content-block handling) |
-| `openai` | OpenAI Chat | `*/v1/chat/completions` | YAML + JSONPath |
-| `openai_responses` | OpenAI Responses | `*/v1/responses` | YAML + JSONPath |
-| `copilot_chat` | GitHub Copilot Chat | `*githubcopilot.com/*/chat/completions` | YAML |
-| `copilot_responses` | GitHub Copilot Responses | `*githubcopilot.com/*/responses` | YAML |
-
-All providers are loaded automatically. Custom providers can be added via YAML files in `~/.scruxy/providers/` or Python classes.
-
-## Scrubbing Pipeline
-
-The pipeline runs detection stages sequentially with priority masking:
-
-```
-pre_filter → whitelist → presidio → regex → file_path → plugins
-            (or openai_privacy_filter as a Presidio alternative)
-```
-
-- **Pre-filter:** Fast substring matching against the global token map (catches known PII from previous requests)
-- **Whitelist:** Excludes safe terms from detection
-- **Presidio:** spaCy NER-based entity recognition (PERSON, EMAIL, PHONE, etc.) — default NER stage
-- **OpenAI Privacy Filter** *(optional)*: ML-based detector wrapping `openai/privacy-filter` (see below)
-- **Regex:** User-defined regex patterns from `~/.scruxy/regex_patterns.yaml`
-- **File path:** Detects file system paths that may contain usernames
-- **Plugins:** Custom `DetectorPlugin` classes from `~/.scruxy/plugins/`
-
-**Performance optimizations:**
-- Per-stage timing profiled with `perf_counter` and logged at INFO level
-- Presidio results cached by text hash (256 entries) — identical text skips NER
-- Unused spaCy pipeline components disabled (parser, tagger, lemmatizer) — 30-50% faster
-- Second-pass cross-field scrub catches PII from later fields in earlier fields
-- To switch to a faster model: set `spacy_model: en_core_web_sm` in Presidio config
-
-## OpenAI Privacy Filter (OPF) — optional alternative to Presidio
-
-Scruxy ships a built-in plugin that wraps the open-source [`openai/privacy-filter`](https://github.com/openai/privacy-filter) model — a 1.5B-parameter bidirectional token classifier (50M active params, mixture-of-experts) that labels eight PII categories in a **single forward pass**: `account_number`, `private_address`, `private_email`, `private_person`, `private_phone`, `private_url`, `private_date`, `secret`.
-
-**Status:** disabled by default. The plugin is registered at startup whether or not the underlying `opf` package is installed; if the package is missing it self-disables with a clear `WARNING` rather than crashing the daemon.
-
-### Why use OPF instead of Presidio?
-
-| Aspect | Presidio (default) | OpenAI Privacy Filter |
-|---|---|---|
-| Architecture | spaCy NER + rule-based recognizers | 1.5B-param transformer (MoE) |
-| Detection pass | Per-recognizer | Single forward pass |
-| Categories | 50+ recognizers, configurable | 8 fixed categories (covers most PII) |
-| Install size | ~600MB (spaCy + en_core_web_lg) | ~2GB (PyTorch + checkpoint) |
-| Cold start | <1s | First call downloads ~1.5GB model |
-| CPU latency | Sub-second for short text, several seconds for ~300KB | Few seconds per call (single pass) |
-| GPU support | No | Yes (CUDA) |
-| Best for | Default workflow; tightly tunable | Long context (128K-token window), one-shot batches |
-
-Running **both** Presidio and OPF wastes CPU because they cover the same PII categories. The `app.py` lifespan emits a `WARNING` at startup when both are enabled.
-
-### Installation
-
-OPF is an optional extra. Install via:
-
-```bash
-# uv
-uv sync --extra opf
-
-# pip
-pip install -e '.[opf]'
-```
-
-This pulls `opf @ git+https://github.com/openai/privacy-filter@main` plus its torch dependencies. **Total install size: ~2GB.** The 1.5GB model checkpoint is downloaded lazily on the first detection request, to `~/.opf/privacy_filter/`. Set `OPF_CHECKPOINT=/path/to/checkpoint` to use a pre-downloaded copy.
-
-### Enable
-
-Two ways:
-
-**1. Web UI (Plugins page)** — toggle the `openai_privacy_filter` row to ON. Configure `device` (`cpu` / `cuda`), `decode_mode` (`viterbi` / `argmax`), `min_score`, `enabled_labels`, and `max_text_length` directly from the dynamic config form.
-
-**2. `~/.scruxy/config.yaml`** — flip the stage entry:
-
-```yaml
-pipeline:
-  stages:
-    - name: presidio
-      enabled: false        # disable Presidio so they don't both run
-    - name: openai_privacy_filter
-      enabled: true
-      config:
-        device: cpu          # or "cuda" if you have an NVIDIA GPU
-        decode_mode: viterbi # higher precision; "argmax" is faster
-        min_score: 0.5       # confidence floor (0.0-1.0)
-        max_text_length: 64000  # skip texts above this size to bound latency
-        enabled_labels:      # leave empty to enable all 8 categories
-          - private_email
-          - private_person
-          - private_phone
-          - account_number
-```
-
-If you enable OPF in config but the `opf` package isn't installed, the plugin logs:
-
-```
-WARNING  scruxy.plugin.openai_privacy_filter: 'opf' package not installed (...);
-plugin self-disables.  Install via 'pip install -e .[opf]' to enable.
-```
-
-…and the daemon continues without it. No crash, no broken pipeline.
-
-### Benchmark Presidio vs OPF on your machine
-
-```bash
-# 4KB text, 5 runs each
-python -m scruxy.bench_opf --text-size 4000 --repeat 5
-
-# Larger / longer-running comparison
-python -m scruxy.bench_opf --text-size 64000 --repeat 3
-
-# Skip one or the other
-python -m scruxy.bench_opf --no-presidio
-python -m scruxy.bench_opf --no-opf
-```
-
-The script prints min ms, mean ms, entity count, and MB/s for each detector side-by-side. If a detector isn't installed it's skipped cleanly.
-
-### On-demand install from the UI
-
-If you want to enable OPF without leaving the daemon running, hit:
-
-```
-POST /ui/api/plugins/openai_privacy_filter/install
-```
-
-This runs `pip install` for the `[opf]` extra in a worker thread, then forces a reload of the plugin. The endpoint returns `{"installed": true}` on success or `{"installed": false, "error": "..."}` on failure. Restart the daemon afterwards so the import takes effect.
-
-## Prerequisites
-
-- Python 3.11+
-- spaCy NLP model (`en_core_web_lg` for accuracy or `en_core_web_sm` for speed)
-- An AI coding assistant (Claude Code, GitHub Copilot, etc.) already configured with its own upstream credentials — Scruxy forwards your assistant's existing `Authorization` header through unchanged and does not handle API keys itself
-
-**Windows-specific:** spaCy is automatically configured with `n_process=1` (Windows uses `spawn` instead of `fork`).
-
-## Development
-
-```bash
-# Clone and install in dev mode
+```powershell
 git clone https://github.com/shahabmokhtari/scruxy.git
 cd scruxy
-pip install -e ".[dev]"
-
-# Download the required spaCy model
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
 python -m spacy download en_core_web_lg
-
-# Run all tests (1,600+)
-pytest
-
-# Run a single test file
-pytest tests/test_token_map.py
-
-# Run with verbose output
-pytest tests/test_token_map.py::test_name -v
-
-# Optional: install the mitmproxy extra (legacy; mitmproxy mode is
-# auto-migrated to 'primary' at startup and the extra is no longer
-# required for normal operation)
-pip install -e ".[mitmproxy]"
+scruxy --no-forward-proxy --no-https
 ```
 
-## Contributing
+<details>
+<summary><strong>macOS / Linux shell commands</strong></summary>
 
-This is a personal project. For changes more complex than typos, please open an issue first to discuss the approach. Forks are welcome.
+```bash
+git clone https://github.com/shahabmokhtari/scruxy.git
+cd scruxy
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+python -m spacy download en_core_web_lg
+scruxy --no-forward-proxy --no-https
+```
 
-## License
+</details>
 
-MIT
+Open **[localhost:8080/ui/](http://localhost:8080/ui/)**. This first run deliberately enables only the HTTP reverse proxy and UI: it does not need certificate trust or change the trust store. The CLI opens a browser unless you pass `--no-browser`.
+
+### Try it without an upstream API call
+
+1. Open **Tester** and choose an Anthropic or OpenAI sample.
+2. Paste synthetic request JSON, then click **Run Test**.
+3. Compare **Request JSON**, **Scrubbed Request**, and **Unscrubbed Request**. Copy an actual generated token into **Response JSON** and run again to see response restoration.
+
+The Tester operates locally on the selected JSONPath fields; it does not contact an LLM. It shares the token map with proxy sessions and persists its input, so use fabricated data for demonstrations. Passing this test confirms that sample's local transformation, not your client's routing or every provider-specific extraction path.
+
+## Connect your assistant
+
+Configure the shell that **launches the assistant**, not just the shell running Scruxy. Keep using the client's existing login or API-key mechanism; Scruxy forwards authentication headers rather than provisioning credentials.
+
+### Claude Code or a client with a base-URL setting
+
+With the quick-start proxy running:
+
+```powershell
+# Claude Code
+$env:ANTHROPIC_BASE_URL = "http://localhost:8080"
+
+# An OpenAI-compatible client that supports OPENAI_BASE_URL
+$env:OPENAI_BASE_URL = "http://localhost:8080/v1"
+```
+
+For OpenAI SDK-style clients, `/v1` is part of the base URL. Other clients append it themselves; use the form that produces `/v1/chat/completions` or `/v1/responses`. Do not assume every Copilot client honors `OPENAI_BASE_URL`.
+
+<details>
+<summary><strong>macOS / Linux environment variables</strong></summary>
+
+```bash
+export ANTHROPIC_BASE_URL="http://localhost:8080"
+export OPENAI_BASE_URL="http://localhost:8080/v1"
+```
+
+</details>
+
+### GitHub Copilot or a client with proxy support
+
+Run `scruxy` to enable the built-in forward proxy (on by default), then configure the client:
+
+```powershell
+$env:HTTP_PROXY = "http://localhost:8081"
+$env:HTTPS_PROXY = "http://localhost:8081"
+$env:NODE_EXTRA_CA_CERTS = "$HOME\.scruxy\certs\scruxy-ca.pem"
+```
+
+HTTPS interception requires the client to trust Scruxy's CA. The default CLI configuration attempts to install the CA into the system trust store; review [CA trust and removal](docs/configuration.md#certificate-trust) first. Set `auto_install_ca_cert: false` if you want to manage trust yourself. Node-based clients can use `NODE_EXTRA_CA_CERTS`; other runtimes may need their own CA configuration. Restart the client after changing its environment.
+
+**Confirm routing:** send a harmless synthetic prompt, then inspect **Recordings** for a matching provider and `REV` or `FWD` badge. A running UI alone does not prove your assistant's traffic is being scrubbed.
+
+| Listener | Default | Enabled by default? |
+|---|---|---|
+| HTTP reverse proxy + UI | `localhost:8080` | Yes |
+| HTTP forward proxy / HTTPS CONNECT | `localhost:8081` | Yes |
+| HTTPS reverse proxy | `localhost:8443` | **No**; enable in configuration |
+
+> [!NOTE]
+> **Legacy mitmproxy mode is retired.** The CLI still accepts `--mode mitmproxy`, but application startup warns and migrates it to `primary` for that run. Use the built-in forward proxy; the optional mitmproxy dependency is not a third supported capture mode.
+
+## Feature tour
+
+### Dashboard: see activity and latency
+
+The [dashboard screenshot above](#scruxy) shows registered providers, request and entity totals, and separate scrub, unscrub, network, and total latency series. Toggle chart series and inspect average, minimum, maximum, p95, and p99 across time windows.
+
+**Use it for:** checking that requests are arriving and distinguishing local detection overhead from upstream response time. Measure with your own payloads; model choice, input length, cache state, and hardware all affect latency.
+
+### Tester: understand a scrub/unscrub round trip
+
+![Tester showing an email replaced in request JSON and restored in response JSON](docs/images/tester.png)
+
+Compare six panels: original request, scrubbed request, restored request, simulated response, restored response, and re-scrubbed response. Select JSONPath fields, vary stages for a test invocation, and inspect detected types, sources, scores, and mappings below the panels.
+
+**Use it for:** debugging missed fields and false positives before connecting an assistant. Test-stage overrides do not change the live pipeline's enabled flags, but mappings are shared.
+
+### Plugins: tune detection and replacement
+
+![Plugins page showing the known-PII pre-filter, whitelist, Presidio, regex, file paths, and optional OPF](docs/images/plugins.png)
+
+The Plugins page is the main pipeline editor. Enable or disable detectors, reorder eligible stages, duplicate built-in stages for separate configurations, rename their display labels, and edit file-backed rules. Whitelist stages are kept ahead of other detectors; the known-PII pre-filter has a fixed leading position.
+
+The local **Plugin Repository** lets you manage available detectors. Custom plugins can expose typed configuration forms and persistent key-value storage. The same page manages per-entity replacement rules: default tokens, UUIDs, or trusted local scripts.
+
+**Use it for:** adding organization-specific identifiers, preserving safe vocabulary, or comparing detector configurations. [Regex, plugin, and replacement examples](docs/configuration.md#extend-detection).
+
+### Providers: control matching and text extraction
+
+<details>
+<summary><strong>View the provider configuration screen</strong></summary>
+
+![Providers page showing upstream URLs and expandable routing and JSONPath settings](docs/images/providers.png)
+
+</details>
+
+| Provider | Supported format | Implementation |
+|---|---|---|
+| `anthropic` | Messages, including supported content blocks and tool inputs | Python + YAML defaults |
+| `openai` | Chat Completions, content parts, and tool-call arguments | Python + YAML defaults |
+| `openai_responses` | Responses input, instructions, outputs, and function arguments | Python + YAML defaults |
+| `copilot_chat` | Copilot Chat Completions | YAML + JSONPath |
+| `copilot_responses` | Copilot Responses | YAML + JSONPath |
+
+Edit upstream URLs, URL patterns, forwarded auth-header names, session extraction, and request/response text paths. Add custom providers through the UI or files in `~/.scruxy/providers`.
+
+**Use it for:** adapting an API-compatible endpoint or investigating an unmatched request. Custom JSONPath overrides change extraction behavior; preserve all relevant fields, including tool arguments. Provider support does not by itself establish compatibility with every client version or endpoint.
+
+### Tokens: inspect what was replaced
+
+<details>
+<summary><strong>View the token browser</strong></summary>
+
+![Token browser showing synthetic email, person, and path mappings for a demo session](docs/images/tokens.png)
+
+</details>
+
+Browse the shared map or filter by session and entity type. Inspect original values, whitelist false positives, and follow first-seen recording links when available. Per-session clearing preserves entries still shared by other sessions.
+
+**Use it for:** explaining a replacement and fixing overly broad detection. Clearing mappings can make later responses containing those tokens impossible to restore. This page intentionally reveals original PII; do not share live screenshots.
+
+### Recordings: follow a request from scrub to response
+
+![Recording with scrubbed request and response JSON plus network and pipeline timing](docs/images/recordings.png)
+
+Pair requests with responses and inspect status, provider, headers, proxy type, per-stage detection timings, and the **scrub + network + unscrub = total** breakdown. Filter by provider, proxy type, session, or text. Switch between raw JSON and chat views, adjust layout and sort order, and keep expanded rows open during incremental refresh.
+
+<details>
+<summary><strong>View a scrub comparison using synthetic original bodies</strong></summary>
+
+![Recording comparison highlighting changes between original and scrubbed JSON](docs/images/recordings-diff.png)
+
+</details>
+
+**Use it for:** verifying what a matched request sent upstream or investigating a token that was not restored. Original-body toggles and before/after comparisons require original bodies to have been recorded. `recording.store_body_original` defaults to **false**; enabling it persists PII and only affects subsequent recordings.
+
+### Passthrough, Logs, and Settings
+
+| Page | What it provides | Important detail |
+|---|---|---|
+| **Passthrough** | Inspect non-provider traffic with method filters, refresh, and log clearing | Logging is off by default. Unmatched traffic is not made safe by appearing in this view; body capture is not enabled by the ordinary logging toggle. |
+| **Logs** | Application log ring buffer, level filters, statistics, and PII detection events | WARNING and above are selected initially. The buffer holds 500 entries; disk logs are separate. |
+| **Settings** | Section-by-section configuration of listeners, tokens, sessions, recording, logging, statistics, and UI | Some changes apply live; restart for listener and storage changes. Use `--no-browser` to reliably suppress CLI browser launch. |
+
+<details>
+<summary><strong>View Settings</strong></summary>
+
+![Settings page showing listener and storage configuration controls](docs/images/settings.png)
+
+</details>
+
+A compact stage-toggle page also exists at `/ui/pipeline`; the sidebar's **Plugins** page is the richer editor. Dark/light theme and several view preferences persist in browser local storage.
+
+## How detection works
+
+```text
+Provider text extraction
+  -> known-PII pre-filter
+  -> whitelist -> Presidio -> regex -> file paths -> custom plugins
+  -> resolve replacements into the shared token map
+  -> cross-field second pass
+  -> forward request
+
+Response -> restore mapped tokens -> return JSON or stream SSE to the client
+```
+
+Stages run with **priority masking**: an earlier detector's spans are protected from later detectors. The request scrubber's second pass revisits fields after new mappings are discovered, catching known PII that appeared in an earlier field.
+
+**Default Presidio categories:** `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `CREDIT_CARD`, `US_SSN`, and `IP_ADDRESS`. Regex and custom plugins add domain-specific types. File-path detection can replace path segments, not only usernames.
+
+**Shared mappings, session-aware restoration:** the same detected value reuses its existing token across sessions while that mapping exists. SQLite persists mappings and session usage by default; `tokens.persistent: false` makes the token store memory-only. This does not turn off recordings, tester-state persistence, or logs.
+
+**Streaming:** the SSE unscrubber buffers partial token prefixes, restores complete tokens, and handles structured event payloads. It can only restore tokens that survive the model's output and still have applicable mappings.
+
+### Optional OpenAI Privacy Filter
+
+The `openai_privacy_filter` plugin runs the open-source [OpenAI Privacy Filter](https://github.com/openai/privacy-filter) locally; it is **not an OpenAI API call**. It is disabled by default and requires the optional `opf` package plus a large model download.
+
+Install from the editable checkout:
+
+```powershell
+python -m pip install -e ".[opf]"
+```
+
+Edit the **existing** OPF entry in `pipeline.stages`, keeping the other stages intact, and disable Presidio for an initial comparison:
+
+```yaml
+- name: openai_privacy_filter
+  enabled: true
+  config:
+    device: cpu
+    decode_mode: viterbi
+    min_score: 0.5
+    max_text_length: 64000
+```
+
+It supports eight labels covering accounts, addresses, email, people, phones, URLs, dates, and secrets. Start by comparing it **instead of** Presidio rather than running both. The default 64,000-character input cap skips longer text for this detector, so account for that coverage gap. Its `min_score` is currently a fixed emitted confidence value, not a calibrated probability threshold.
+
+See [installation, configuration, and benchmarking](docs/configuration.md#optional-openai-privacy-filter) before enabling it.
+
+## Privacy boundaries
+
+| Boundary | What to understand |
+|---|---|
+| **Detection coverage** | Only supported/extracted text and configured detectors are covered. Do not assume images, arbitrary binary content, every JSON field, or every secret format is inspected. Whitelists, disabled detectors, timeouts, and size limits can reduce coverage. |
+| **Routing** | Forward-proxy traffic that does not match an enabled provider can pass through unchanged. Unknown routes on the main reverse-proxy port normally return 404 instead. Local loopback forwarding and admin-route restrictions have separate handling. |
+| **Authentication** | Credentials still reach the upstream service for authentication. Recordings mask selected sensitive header values; arbitrary headers and metadata are not a general-purpose PII-scrubbing surface. |
+| **Local storage** | The token database contains original PII. Tester inputs, opt-in original-body recordings, custom-plugin data, logs, and metadata may also contain sensitive material. Review files before exporting them. |
+| **Local administration** | The UI exposes PII and can edit executable plugins/scripts and install optional packages. Keep it on loopback and use it as a single-operator tool, not a public or multi-tenant service. |
+| **TLS interception** | Trusting the local CA enables interception. Protect its private key, never distribute it, and remove trust when no longer needed. Do not disable TLS verification as a workaround. |
+
+Scruxy is a configurable privacy layer, not an encrypted vault, network firewall, or compliance certification.
+
+## Configuration and development
+
+The default configuration location is `~/.scruxy/config.yaml`. Missing values use application defaults; file-backed whitelist/regex files and script examples are seeded as needed. Save settings through the UI or provide your own YAML. `--config` chooses the config file but does **not** relocate every runtime-data path.
+
+```powershell
+scruxy --config .\config.yaml --no-browser
+scruxy --port 9090 --forward-proxy-port 9081
+scruxy --help
+```
+
+For the complete CLI, CA setup, configuration examples, data layout, extension APIs, and troubleshooting, see **[Configuration and operations](docs/configuration.md)**.
+
+For development with [uv](https://docs.astral.sh/uv/), from the checkout:
+
+```powershell
+uv sync --group dev
+uv run python -m spacy download en_core_web_lg
+uv run pytest
+uv run pytest tests/test_token_map.py
+uv run ruff check .
+```
+
+Development tools are a dependency **group**, not a `dev` extra. The UI is vanilla HTML/CSS/JavaScript served by FastAPI; it has no frontend build step.
+
+| Code area | Responsibility |
+|---|---|
+| [`app.py`](src/scruxy/app.py), [`__main__.py`](src/scruxy/__main__.py) | Startup, services, configuration, CLI |
+| [`providers`](src/scruxy/providers), [`default_config/providers`](default_config/providers) | Request matching and format-specific extraction |
+| [`pipeline`](src/scruxy/pipeline), [`plugin`](src/scruxy/plugin) | Detection, masking, built-in/custom detectors |
+| [`scrubber`](src/scruxy/scrubber), [`tokenmap`](src/scruxy/tokenmap) | Request transforms, response restoration, persistent mappings |
+| [`proxy`](src/scruxy/proxy), [`recording`](src/scruxy/recording) | Forwarding, CONNECT interception, JSONL recordings |
+| [`ui`](src/scruxy/ui), [`tests`](tests) | Local control panel and regression coverage |
+
+Historical design documents live in [`docs/plans`](docs/plans); they describe design decisions at the time, not the current operations contract.
+
+## Contributing and support
+
+Scruxy is an open-source local privacy tool. Use [issues](https://github.com/shahabmokhtari/scruxy/issues) to discuss substantial changes and pull requests for review. Follow the repository's [development workflow](CLAUDE.md), include regression coverage for behavioral changes, and never attach live PII, credentials, or private CA keys.
+
+**License:** MIT, as declared in [`pyproject.toml`](pyproject.toml).

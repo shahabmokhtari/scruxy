@@ -797,7 +797,10 @@ class TestForwardProxyServer:
             b"200 Connection established" in chunk for chunk in client_writer.writes
         )
 
-    async def test_handle_connect_loopback_nonmain_port_tunnels(self, mock_deps: dict) -> None:
+    @pytest.mark.parametrize("host", ["127.0.0.1", "[::ffff:127.0.0.1]"])
+    async def test_handle_connect_loopback_nonmain_port_tunnels(
+        self, mock_deps: dict, host: str
+    ) -> None:
         """CONNECT to a loopback target on a NON-main port (e.g. a local
         HTTPS MCP server) must establish a tunnel, not 403."""
         mock_deps["registry"].providers = []
@@ -827,17 +830,20 @@ class TestForwardProxyServer:
 
         with patch(
             "socket.getaddrinfo",
-            return_value=[(None, None, None, None, ("127.0.0.1", 9001))],
+            return_value=[(None, None, None, None, (host.strip("[]"), 9001))],
         ), patch(
             "scruxy.proxy.forward_proxy.asyncio.open_connection",
             new=AsyncMock(return_value=(upstream_reader, upstream_writer)),
         ):
-            await server._handle_connect("127.0.0.1:9001", {}, client_reader, client_writer)
+            await server._handle_connect(f"{host}:9001", {}, client_reader, client_writer)
 
         assert any(b"200 Connection established" in w for w in client_writer.writes)
         assert not any(b"403" in w for w in client_writer.writes)
 
-    async def test_handle_connect_loopback_main_port_blocked(self, mock_deps: dict) -> None:
+    @pytest.mark.parametrize("host", ["127.0.0.1", "[::ffff:127.0.0.1]"])
+    async def test_handle_connect_loopback_main_port_blocked(
+        self, mock_deps: dict, host: str
+    ) -> None:
         """CONNECT to loopback on the MAIN listen port must be rejected: it
         would bypass the per-path admin/UI block (CONNECT exposes no path)."""
         mock_deps["registry"].providers = []
@@ -861,11 +867,11 @@ class TestForwardProxyServer:
 
         with patch(
             "socket.getaddrinfo",
-            return_value=[(None, None, None, None, ("127.0.0.1", 8080))],
+            return_value=[(None, None, None, None, (host.strip("[]"), 8080))],
         ), patch(
             "scruxy.proxy.forward_proxy.asyncio.open_connection", new=open_conn
         ):
-            await server._handle_connect("127.0.0.1:8080", {}, client_reader, client_writer)
+            await server._handle_connect(f"{host}:8080", {}, client_reader, client_writer)
 
         assert any(b"403 Forbidden" in w for w in client_writer.writes)
         assert not any(b"200 Connection established" in w for w in client_writer.writes)
@@ -875,11 +881,29 @@ class TestForwardProxyServer:
         """`_is_loopback_hostname` accepts loopback literals (incl. FQDN
         trailing dot) and rejects everything else (no DNS resolution)."""
         for h in ["localhost", "localhost.", "LOCALHOST", "127.0.0.1", "127.0.0.1.",
-                  "127.0.0.2", "::1", "[::1]", "[::ffff:127.0.0.1]"]:
+                  "127.0.0.2", "::1", "[::1]", "[::ffff:127.0.0.1]",
+                  "::ffff:7f00:2"]:
             assert _is_loopback_hostname(h) is True, h
         for h in ["example.com", "localhost.example.com", "10.0.0.1",
-                  "192.168.1.1", "169.254.169.254", "0.0.0.0", "", None]:
+                  "192.168.1.1", "169.254.169.254", "0.0.0.0", "", None,
+                  "[::ffff:10.0.0.1]", "::ffff:169.254.169.254", "64:ff9b::7f00:1"]:
             assert _is_loopback_hostname(h) is False, h
+
+    @pytest.mark.parametrize("address", [
+        "::ffff:10.0.0.1", "::ffff:192.168.1.1", "::ffff:169.254.169.254",
+        "64:ff9b::7f00:1",
+    ])
+    async def test_loopback_exception_rejects_other_embedded_addresses(
+        self, address: str
+    ) -> None:
+        from scruxy.proxy.forward_proxy import _resolve_public_endpoints
+
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, (address, 8765))],
+        ):
+            with pytest.raises(PermissionError):
+                await _resolve_public_endpoints("localhost", 8765, allow_loopback=True)
 
     async def test_passthrough_tunnel_tries_second_address(self, mock_deps: dict) -> None:
         """CONNECT passthrough should fall back to a later validated address."""
