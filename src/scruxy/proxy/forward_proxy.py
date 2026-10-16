@@ -435,7 +435,10 @@ def _is_loopback_hostname(hostname: str | None) -> bool:
         host = host[1:-1]
     import ipaddress
     try:
-        return ipaddress.ip_address(host).is_loopback
+        ip = ipaddress.ip_address(host)
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        return ip.is_loopback
     except ValueError:
         return False
 
@@ -551,7 +554,9 @@ async def _resolve_public_endpoints(
     seen: set[tuple[str, int]] = set()
     for _, _, _, _, addr in addrs:
         ip = _ipa.ip_address(addr[0])
-        if _is_forbidden_proxy_ip(ip) and not (allow_loopback and ip.is_loopback):
+        if _is_forbidden_proxy_ip(ip) and not (
+            allow_loopback and _is_loopback_hostname(str(ip))
+        ):
             raise PermissionError(f"private/reserved IP {ip}")
         candidate = (addr[0], addr[1])
         if candidate not in seen:

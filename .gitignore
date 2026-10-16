@@ -19,3 +19,10 @@ htmlcov/
 *.log
 .claude/worktrees/
 ~/
+
+# Local scratch / review artifacts (root-level; never commit)
+/diff*.txt
+/_diff_*.txt
+/*_diff.txt
+/_r[0-9]*.txt
+/review_findings_*.md

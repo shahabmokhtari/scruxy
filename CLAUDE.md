@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Scruxy** — a standalone, multi-provider, local Python proxy that intercepts LLM API traffic from AI coding assistants (Claude Code, GitHub Copilot), scrubs PII before it leaves the machine, forwards scrubbed requests to upstream APIs, and unscrubs responses so users see original values transparently.
 
-**Status:** Fully implemented and functional. All core modules are built and tested (1,600+ tests).
+**Status:** Core modules and regression tests are implemented. Use the current test run for counts rather than a fixed count in documentation.
 
-**Design Spec:** `docs/plans/2026-03-03-scrubbing-proxy-design.md` — the original design reference. The implementation is faithful to this spec with enhancements (SQLite token storage, forward proxy MITM, incremental UI updates, per-stage pipeline profiling, Presidio caching, cross-field second-pass scrub).
+**Design Spec:** `docs/plans/2026-03-03-scrubbing-proxy-design.md` is a historical design reference. For current setup, defaults, supported modes, and privacy limitations, use `README.md` and `docs/configuration.md`. The implementation includes SQLite token storage, built-in forward proxy MITM, incremental UI updates, pipeline profiling, Presidio caching, and cross-field second-pass scrub.
 
 ## Development Workflow
 
@@ -16,11 +16,11 @@ Always follow this flow for feature work and bug fixes:
 
 1. **Pull latest** from remote before starting any work:
    ```bash
-   git checkout development && git pull origin development
+   git checkout main && git pull --ff-only origin main
    ```
-2. **Create a feature branch** from `development` (or use `git worktree` for parallel work):
+2. **Create a feature branch** from `main` (or use `git worktree` for parallel work):
    ```bash
-   git checkout -b feature/my-feature development
+   git checkout -b feature/my-feature main
    ```
 3. **Make changes** — write code, add/update tests, ensure all tests pass:
    ```bash
@@ -39,7 +39,7 @@ Always follow this flow for feature work and bug fixes:
 
    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
    ```
-6. **Push the feature branch** and **create a PR** targeting `development` with a detailed description:
+6. **Push the feature branch** and **create a PR** targeting `main` with a detailed description:
    - What changed and why
    - Testing done (test count, manual verification)
    - Breaking changes (if any)
@@ -47,17 +47,16 @@ Always follow this flow for feature work and bug fixes:
    - Run at least **3–5 rounds** of review
    - Fix all high, medium, and low issues found in each round before running the next
    - Only merge when reviewers report no significant issues
-8. **Merge the PR** into `development` once all review rounds pass.
+8. **Merge the PR** into `main` once all review rounds pass.
 9. **Push** after merging:
    ```bash
-   git push origin development
+   git push origin main
    ```
 
 ### Branch Strategy
 
-- **`development`** — the active integration branch. All feature branches branch from and merge back into `development`.
-- **`main`** — stable release branch. `development` is merged into `main` less frequently (release cadence).
-- **Feature branches** — `feature/my-feature`, created from `development`, merged via PR with review.
+- **`main`** — the public integration branch.
+- **Feature branches** — `feature/my-feature`, created from `main`, merged via PR with review.
 - Always `git pull` before starting work and `git push` after completing work.
 
 ## Tech Stack
@@ -67,25 +66,25 @@ Always follow this flow for feature work and bug fixes:
 - SQLite (via aiosqlite) for persistent token storage; optional in-memory-only mode
 - Vanilla HTML/CSS/JS frontend (no build step, no CDN)
 - YAML for config, JSONL for recordings
+- Built-in CONNECT/TLS interception; legacy mitmproxy mode is retired
+- Optional: OpenAI Privacy Filter (`opf`) for local ML detection
 
 ## Build & Run Commands
 
 ```bash
 pip install -e .                              # Install in dev mode
+uv sync --group dev                          # Install development dependency group
 python -m spacy download en_core_web_lg       # Required NLP model
 
 scruxy                               # Start proxy (default: localhost:8080)
 scruxy --config path/to/config.yaml  # Custom config
-scruxy --no-browser                  # Don't open dashboard on startup
-scruxy --no-https                    # Disable HTTPS reverse proxy
-scruxy --no-forward-proxy            # Disable HTTP forward proxy
+scruxy --no-forward-proxy --no-https # HTTP reverse proxy only, no CA trust needed
+scruxy --no-browser                 # Suppress automatic browser launch
 
 pytest                                        # Run all tests
 pytest tests/test_token_map.py                # Run a single test file
 pytest tests/test_token_map.py::test_name -v  # Run a single test
 ```
-
-The `mitmproxy` extra (`pip install -e ".[mitmproxy]"`) is still wired up, but `interception.mode = "mitmproxy"` is legacy — `app.py` auto-migrates it to `"primary"` at startup with a `WARNING`. All scrubbing now flows through the in-process reverse + forward proxies.
 
 ## Architecture
 
@@ -137,14 +136,14 @@ Built-in providers (loaded automatically):
 - **anthropic** — Anthropic Claude API (`/v1/messages`), Python class with content-block handling
 - **openai** — OpenAI-compatible chat completions (`/v1/chat/completions`)
 - **openai_responses** — OpenAI Responses API (`/v1/responses`)
-- **copilot_chat** — GitHub Copilot chat completions (YAML-only, `*githubcopilot.com/*/chat/completions`)
-- **copilot_responses** — GitHub Copilot Responses API (YAML-only, `*githubcopilot.com/*/responses`)
+- **copilot_chat** — GitHub Copilot chat completions (YAML-only; versioned and unversioned paths)
+- **copilot_responses** — GitHub Copilot Responses API (YAML-only; versioned and unversioned paths)
 
 Two extension mechanisms:
 1. **YAML-only** (declarative) — drop a `.yaml` in `~/.scruxy/providers/` using JSONPath expressions
 2. **Python class** — inherit from `LLMProvider` for complex APIs (e.g. Anthropic content blocks)
 
-Provider router tries `matches()` in priority order (URL pattern → headers → body structure). First match wins; unmatched requests pass through unmodified.
+Provider matching gathers enabled candidates, uses configured matching-header names to disambiguate multiple matches, then falls back to registration order. Unmatched forward-proxy traffic can pass through unmodified; unknown routes on the main reverse-proxy port normally return 404.
 
 ### Scrubbing Pipeline
 
@@ -155,19 +154,19 @@ The pipeline processes text fields sequentially through stages: `pre_filter → 
 **Second-pass scrub:** After all fields are processed, `RequestScrubber` re-applies the pre-filter across all fields using the now-complete token map. This catches PII discovered in later fields (e.g., a name found in a user message that also appears as a substring in the system prompt).
 
 **Presidio optimizations:**
-- Unused spaCy pipeline components disabled (parser, tagger, lemmatizer, attribute_ruler) — 30-50% faster
+- Unused spaCy pipeline components disabled (parser, tagger, lemmatizer, attribute_ruler); measure performance on representative inputs
 - MD5-keyed result cache (256 entries) — identical text skips NER entirely
-- Recognizers filtered to configured entity types only — suppresses warnings
+- Recognizers filtered to configured entity types; inspect startup warnings for unavailable models or unsupported languages
 - `reconfigure()` method detects config changes and reinitializes
 
 ### Token Map
 
-Bidirectional PII ↔ token mapping, stored in a shared `TokenMap` backed by SQLite (`~/.scruxy/scruxy.db`). Format: `REDACTED_{TYPE}_{N}` (deterministic — same PII always maps to same token). In-memory cache with write-through to SQLite. Set `tokens.persistent: false` in config for in-memory-only mode (no SQLite).
+Bidirectional PII ↔ token mapping, stored in a shared `TokenMap` backed by SQLite (`~/.scruxy/scruxy.db`). Default format: `REDACTED_{TYPE}_{N}`; an existing mapping is reused across sessions while it exists. Session usage is tracked in SQLite, with session-aware response restoration and cleanup. The in-memory cache writes through to SQLite. Set `tokens.persistent: false` for a memory-only token store; recordings, tester state, logs, and plugin data have separate persistence behavior.
 
 ### Forward Proxy Routing
 
 When both `ANTHROPIC_BASE_URL` (reverse proxy) and `HTTP_PROXY` (forward proxy) are set:
-- Requests to `localhost:{main_port}` are detected and passed through without scrubbing — the reverse proxy handles them
+- Allowed loopback traffic can be forwarded to local services without scrubbing; the app's own admin/UI surface is protected separately
 - For matched providers, the forward proxy resolves the provider's `upstream_url` before forwarding (avoids loopback)
 - Provider-matched requests are recorded with `proxy_type="forward"` and NOT logged to passthrough
 
@@ -175,7 +174,9 @@ When both `ANTHROPIC_BASE_URL` (reverse proxy) and `HTTP_PROXY` (forward proxy) 
 
 - **Windows:** `n_process=1` set automatically for spaCy (uses `spawn`, not `fork`); `WinError 64` TLS failures from parallel CONNECT tunnels logged at DEBUG
 - **Cross-platform:** Primary focus Windows, works on macOS/Linux
-- All listeners bind to `localhost` by default (IPv4 + IPv6 dual-stack)
+- Listener host defaults to `localhost`; IPv4/IPv6 resolution and binding depend on the listener and OS
+- Forward proxy is enabled by default on 8081; HTTPS reverse proxy is disabled by default (port 8443 when enabled)
+- `--mode mitmproxy` remains parseable for compatibility, but startup warns and migrates it to `primary` for that run
 
 ## Configuration
 
@@ -183,21 +184,24 @@ Main config: `~/.scruxy/config.yaml`. User-defined regex patterns in `~/.scruxy/
 
 ## Design Constraints
 
-- **< 100ms latency overhead** for the scrubbing pipeline (excluding Presidio NER)
-- **Deterministic tokens** — same PII → same token globally (shared map)
-- **Per-plugin timeout** of 50ms to protect latency budget
-- **No LLM calls** for PII detection (Presidio + regex + plugins only)
-- Real PII is **never** stored in recordings — only in the token map
+- **Latency target:** < 100ms excluding Presidio NER, not a guaranteed benchmark
+- **Mapping reuse:** the same PII reuses its existing token globally until mappings are removed or expired
+- **Per-custom-plugin timeout:** 50ms by default; failures/timeouts are logged and results skipped, not sandboxed
+- **Local detection:** built-in detectors do not call an upstream LLM; optional OPF inference is local too
+- **Recording privacy:** original bodies are off by default; `recording.store_body_original: true` stores original PII. Missed detections and metadata can remain sensitive even in scrubbed recordings
+- **Local administration:** the UI exposes PII and edits executable plugins/scripts; keep it on loopback for a trusted single operator
 
 ## Web UI
 
 Dashboard at `http://localhost:8080/ui/` with pages for:
 - **Dashboard** — live stats, latency charts, entity counts, all registered providers
-- **Tester** — test the scrubbing pipeline interactively
-- **Plugins** — manage detection plugins (built-in + custom)
+- **Tester** — locally test selected JSONPath fields and round-trip transformations; shares the token map and persists input
+- **Plugins** — manage detection order, built-in/custom detectors, duplicate stages, file-backed configuration, and replacement rules/scripts
 - **Providers** — view/configure LLM API providers (URL patterns, auth headers, text paths)
 - **Tokens** — browse the token map (PII ↔ token mappings)
 - **Recordings** — scrubbed request/response pairs with raw/chat/diff views, per-request latency breakdown (scrub → network → unscrub = total), per-stage pipeline timing, collapsible headers, scrubbed/unscrubbed body toggle, FWD/REV proxy badge, auto-refresh via SSE
-- **Passthrough** — all proxied requests with method filters (CONNECT hidden by default), expandable body details, persisted filter preferences
+- **Passthrough** — non-provider traffic logging (off by default), method filters (CONNECT hidden by default), persisted filter preferences; body capture is separate from the normal logging toggle
 - **Logs** — application log viewer (ring buffer, 500 entries) with log level filter chips (WARNING+ by default), PII detection event table; all preferences persisted in localStorage
-- **Settings** — edit all config sections + config files (whitelist, regex patterns)
+- **Settings** — edit application configuration sections; restart for listener/storage changes. Whitelist and regex file editors are available from Plugins
+
+The compact stage-toggle page at `/ui/pipeline` is also available; Plugins is the main sidebar pipeline editor. README screenshots use isolated synthetic data; see `docs/screenshots.md`.
